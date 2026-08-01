@@ -1,1 +1,6 @@
 .worktrees/
+.env
+credentials*
+deployment-report.json
+infra/runtime/
+appdata/

@@ -1,0 +1,40 @@
+{
+  "distroName": "MediaServer",
+  "distroPath": "D:\\WSL\\MediaServer",
+  "mediaRoot": "D:\\Media",
+  "timezone": "Asia/Ho_Chi_Minh",
+  "puid": 1000,
+  "pgid": 1000,
+  "wslUser": "media",
+  "services": [
+    "jellyfin",
+    "seerr",
+    "radarr",
+    "sonarr",
+    "lidarr",
+    "prowlarr",
+    "bazarr",
+    "qbittorrent",
+    "sabnzbd",
+    "autobrr",
+    "flaresolverr",
+    "cleanuparr",
+    "wizarr"
+  ],
+  "ports": {
+    "jellyfin": { "host": 8096, "container": 8096 },
+    "seerr": { "host": 5055, "container": 5055 },
+    "radarr": { "host": 7878, "container": 7878 },
+    "sonarr": { "host": 8989, "container": 8989 },
+    "lidarr": { "host": 8686, "container": 8686 },
+    "prowlarr": { "host": 9696, "container": 9696 },
+    "bazarr": { "host": 6767, "container": 6767 },
+    "qbittorrent": { "host": 8081, "container": 8080 },
+    "sabnzbd": { "host": 8085, "container": 8080 },
+    "autobrr": { "host": 7474, "container": 7474 },
+    "flaresolverr": { "container": 8191 },
+    "cleanuparr": { "host": 11011, "container": 11011 },
+    "wizarr": { "host": 5690, "container": 5690 }
+  },
+  "publishedLanPorts": [8096, 5055, 7878, 8989, 8686, 9696, 6767, 8081, 8085, 7474, 11011, 5690]
+}
