@@ -1,6 +1,8 @@
 import importlib.util
+import json
 import pathlib
 import subprocess
+import tempfile
 import unittest
 
 
@@ -37,6 +39,24 @@ class StackConfigurationTests(unittest.TestCase):
         self.assertEqual(
             "/data/downloads/usenet/incomplete", settings["download_dir"]
         )
+
+    def test_seerr_network_prefers_ipv4_without_changing_secrets(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = pathlib.Path(directory) / "settings.json"
+            original = {
+                "sessionSecret": "keep-me",
+                "network": {"forceIpv4First": False, "apiRequestTimeout": 20000},
+                "radarr": [{"name": "Radarr", "activeProfileId": 1}],
+                "sonarr": [{"name": "Sonarr", "activeProfileId": 1}],
+            }
+            path.write_text(json.dumps(original), encoding="utf-8")
+            changed = configure_stack.configure_seerr_network(path)
+            configured = json.loads(path.read_text(encoding="utf-8"))
+            self.assertTrue(changed)
+            self.assertTrue(configured["network"]["forceIpv4First"])
+            self.assertEqual(configured["radarr"][0]["activeProfileId"], 4)
+            self.assertEqual(configured["sonarr"][0]["activeProfileId"], 4)
+            self.assertEqual(configured["sessionSecret"], "keep-me")
 
     def test_redact_hides_known_secret_shapes(self):
         text = 'ApiKey="0123456789abcdef0123456789abcdef" password=hunter2'

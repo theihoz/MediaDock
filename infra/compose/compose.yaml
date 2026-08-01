@@ -10,6 +10,26 @@ x-lsio-environment: &lsio-environment
   TZ: ${TZ}
 
 services:
+  media-control:
+    build:
+      context: /srv/media-stack/media-control
+    image: server-phim/media-control:local
+    container_name: media-control
+    environment:
+      TZ: ${TZ}
+      MEDIA_CONTROL_TOKEN_FILE: /run/secrets/media-control.token
+    ports:
+      - "127.0.0.1:11444:11444"
+    volumes:
+      - /srv/media-stack/secrets/media-control.token:/run/secrets/media-control.token:ro
+      - /srv/media-stack/secrets/qbittorrent.password:/run/secrets/qbittorrent.password:ro
+      - /srv/media-stack/appdata:/service-config:ro
+      - /mnt/d/Media:/data:ro
+      - /srv/media-stack/appdata/media-control:/state
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
   jellyfin:
     image: jellyfin/jellyfin:latest
     container_name: jellyfin
@@ -44,6 +64,9 @@ services:
       LOG_LEVEL: info
       TZ: ${TZ}
       PORT: 5055
+    dns:
+      - 1.1.1.1
+      - 8.8.8.8
     ports:
       - "5055:5055"
     volumes:

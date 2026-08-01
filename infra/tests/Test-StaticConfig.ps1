@@ -141,6 +141,15 @@ foreach ($pattern in @('/data/library/movies', '/data/library/tv', '/data/librar
 $integrationVerifier = Join-Path $infraRoot 'linux\verify-integrations.py'
 if (-not (Test-Path -LiteralPath $integrationVerifier)) { throw "Integration verifier missing: $integrationVerifier" }
 
+$mediaControlDockerfile = Join-Path (Split-Path -Parent $infraRoot) 'media-control\Dockerfile'
+if (-not (Test-Path -LiteralPath $mediaControlDockerfile)) { throw "media-control Dockerfile missing: $mediaControlDockerfile" }
+$tokenScript = Join-Path $infraRoot 'linux\ensure-media-control-token.sh'
+if (-not (Test-Path -LiteralPath $tokenScript)) { throw "media-control token script missing: $tokenScript" }
+$tokenContent = Get-Content -LiteralPath $tokenScript -Raw
+foreach ($pattern in @('umask 077', 'media-control.token', 'chmod 0600')) {
+    if ($tokenContent -notmatch [regex]::Escape($pattern)) { throw "Token script contract missing: $pattern" }
+}
+
 $readmePath = Join-Path (Split-Path -Parent $infraRoot) 'README.md'
 if (-not (Test-Path -LiteralPath $readmePath)) { throw "Operator README missing: $readmePath" }
 $readme = Get-Content -LiteralPath $readmePath -Raw

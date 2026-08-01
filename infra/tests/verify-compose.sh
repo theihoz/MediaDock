@@ -8,7 +8,7 @@ env_file=${2:-/srv/media-stack/.env}
 [[ -f $env_file ]] || { echo "FAIL environment file missing: $env_file" >&2; exit 1; }
 
 config=$(docker compose --env-file "$env_file" -f "$compose_file" config --format json)
-expected='["autobrr","bazarr","cleanuparr","flaresolverr","jellyfin","lidarr","prowlarr","qbittorrent","radarr","sabnzbd","seerr","sonarr","wizarr"]'
+expected='["autobrr","bazarr","cleanuparr","flaresolverr","jellyfin","lidarr","media-control","prowlarr","qbittorrent","radarr","sabnzbd","seerr","sonarr","wizarr"]'
 actual=$(jq -c '.services | keys | sort' <<<"$config")
 [[ $actual == "$expected" ]] || { echo "FAIL unexpected services: $actual" >&2; exit 1; }
 
@@ -17,6 +17,15 @@ jq -e '[.services[] | select(.restart != "unless-stopped")] | length == 0' <<<"$
 }
 jq -e '.services.flaresolverr.ports == null' <<<"$config" >/dev/null || {
   echo 'FAIL FlareSolverr must not publish a host port' >&2; exit 1;
+}
+jq -e '.services["media-control"].ports[] | select(.host_ip == "127.0.0.1" and .published == "11444" and .target == 11444)' <<<"$config" >/dev/null || {
+  echo 'FAIL media-control must publish only 127.0.0.1:11444' >&2; exit 1;
+}
+jq -e '.services["media-control"].volumes[] | select(.source == "/srv/media-stack/secrets/media-control.token" and .target == "/run/secrets/media-control.token" and .read_only == true)' <<<"$config" >/dev/null || {
+  echo 'FAIL media-control must mount the control token read-only' >&2; exit 1;
+}
+jq -e '.services.seerr.dns == ["1.1.1.1", "8.8.8.8"]' <<<"$config" >/dev/null || {
+  echo 'FAIL Seerr must bypass the router DNS block for TMDB' >&2; exit 1;
 }
 jq -e '.services.qbittorrent.ports[] | select(.published == "8081" and .target == 8081)' <<<"$config" >/dev/null || {
   echo 'FAIL qBittorrent must publish 8081:8081' >&2; exit 1;

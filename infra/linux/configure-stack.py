@@ -346,6 +346,23 @@ def set_yaml_value(lines: list[str], section: str, key: str, value) -> bool:
     raise KeyError(f"Bazarr setting not found: {section}.{key}")
 
 
+def configure_seerr_network(path: Path | None = None) -> bool:
+    path = path or APPDATA / "seerr" / "settings.json"
+    settings = json.loads(path.read_text(encoding="utf-8"))
+    network = settings.setdefault("network", {})
+    changed = network.get("forceIpv4First") is not True
+    network["forceIpv4First"] = True
+    for service in ("radarr", "sonarr"):
+        for server in settings.get(service, []):
+            if server.get("is4k") is not True and server.get("activeProfileId") != 4:
+                server["activeProfileId"] = 4
+                changed = True
+    if not changed:
+        return False
+    path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return True
+
+
 def configure_bazarr() -> None:
     path = APPDATA / "bazarr" / "config" / "config.yaml"
     lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
@@ -399,6 +416,10 @@ def main() -> None:
     sab_key = configure_sabnzbd()
     configure_download_clients(env, sab_key)
     ensure_prowlarr_integrations()
+    if configure_seerr_network():
+        subprocess.run(
+            ["docker", "restart", "jellyseerr"], check=True, stdout=subprocess.DEVNULL
+        )
     configure_bazarr()
     enable_jellyfin_nvenc()
     status = {
