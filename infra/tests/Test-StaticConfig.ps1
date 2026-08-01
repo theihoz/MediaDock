@@ -79,5 +79,17 @@ foreach ($pattern in @('systemd=true', 'default=media', 'metadata,uid=1000,gid=1
 if ($initializer -match 'NOPASSWD' -or $initializer -match 'groups\s+sudo') {
     throw 'The media user must not receive broad sudo privileges'
 }
+$attributesPath = Join-Path (Split-Path -Parent $infraRoot) '.gitattributes'
+if (-not (Test-Path -LiteralPath $attributesPath)) { throw '.gitattributes is required for Linux scripts' }
+$attributes = Get-Content -LiteralPath $attributesPath -Raw
+if ($attributes -notmatch '\*\.sh\s+text\s+eol=lf') { throw 'Shell scripts must use LF endings' }
+$hostVerifier = Join-Path $infraRoot 'linux\verify-host.sh'
+if (-not (Test-Path -LiteralPath $hostVerifier)) { throw "Host verifier missing: $hostVerifier" }
+$hostBootstrap = Join-Path $infraRoot 'linux\bootstrap-host.sh'
+if (-not (Test-Path -LiteralPath $hostBootstrap)) { throw "Host bootstrap missing: $hostBootstrap" }
+$bootstrap = Get-Content -LiteralPath $hostBootstrap -Raw
+foreach ($pattern in @('download.docker.com/linux/ubuntu', 'docker-ce', 'nvidia-container-toolkit', 'nvidia-ctk runtime configure', 'systemctl enable --now docker')) {
+    if ($bootstrap -notmatch [regex]::Escape($pattern)) { throw "Host bootstrap contract missing: $pattern" }
+}
 
 Write-Output 'PASS static media-stack contract'
