@@ -15,9 +15,9 @@ Create a third, independent Ubuntu 24.04 LTS WSL2 distribution named `MediaServe
 
 ## Services and Integration
 
-The Compose project includes Jellyfin, Jellyseerr, Radarr, Sonarr, Lidarr, Prowlarr, Bazarr, qBittorrent, SABnzbd, Autobrr, FlareSolverr, Cleanuparr, and Wizarr. Stable production images are used and container logs are rotated.
+The Compose project includes Jellyfin, Seerr (the maintained successor to Jellyseerr), Radarr, Sonarr, Lidarr, Prowlarr, Bazarr, qBittorrent, SABnzbd, Autobrr, FlareSolverr, Cleanuparr, and Wizarr. Stable production images are used and container logs are rotated.
 
-- Jellyfin is the playback server; Jellyseerr sends movie and series requests to Radarr and Sonarr; Wizarr manages Jellyfin invitations.
+- Jellyfin is the playback server; Seerr sends movie and series requests to Radarr and Sonarr; Wizarr manages Jellyfin invitations.
 - Prowlarr synchronizes configured indexers to Radarr, Sonarr, and Lidarr. FlareSolverr is available only for a compatible indexer that needs it.
 - Radarr, Sonarr, and Lidarr use qBittorrent and SABnzbd as download clients. Categories keep movies, TV, and music separate.
 - Autobrr is connected to qBittorrent and the Arr services. Cleanuparr is connected to the Arr services and qBittorrent, with conservative cleanup defaults that do not delete imported library media.
@@ -59,10 +59,10 @@ Generated service credentials are unique and stored only inside the distro in a 
 ## Acceptance Criteria
 
 - `wsl --list --verbose` shows `MediaServer` as WSL2 and its registered base path resolves under `D:\WSL\MediaServer`; existing distro registration and default selection are unchanged.
-- Docker commands inside `MediaServer` use the distro-local Docker Engine, and all 14 requested services are created with persistent state on the intended paths.
+- Docker commands inside `MediaServer` use the distro-local Docker Engine, and all 13 requested services are created with persistent state on the intended paths.
 - A file created in `D:\Media` is visible at the expected `/data` path in relevant containers; read/write permissions and a hardlink probe are recorded.
 - Internal DNS and API checks prove the declared service connections. External-provider-dependent integrations are clearly reported as awaiting user credentials.
-- A phone or TV on the home Wi-Fi can open Jellyfin and Jellyseerr through the Windows host's LAN address, while the services are not deliberately exposed beyond the Private LAN profile.
+- A phone or TV on the home Wi-Fi can open Jellyfin and Seerr through the Windows host's LAN address, while the services are not deliberately exposed beyond the Private LAN profile.
 - A forced 4K-to-1080p Jellyfin playback shows an active NVIDIA transcoding process and remains playable; direct play is also verified.
 - Stopping and starting through the helper scripts restores healthy containers without touching `Ubuntu`, `PCMClawUbuntu`, or Docker Desktop.
 
