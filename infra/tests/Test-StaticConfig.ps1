@@ -36,4 +36,48 @@ foreach ($root in $productionRoots) {
     if ($matches) { throw "Destructive WSL unregister command found under $root" }
 }
 
+$installerPath = Join-Path $infraRoot 'windows\Install-MediaServer.ps1'
+if (-not (Test-Path -LiteralPath $installerPath)) {
+    throw "Installer missing: $installerPath"
+}
+$installer = Get-Content -LiteralPath $installerPath -Raw
+$tokens = $null
+$parseErrors = $null
+[void][System.Management.Automation.Language.Parser]::ParseFile($installerPath, [ref]$tokens, [ref]$parseErrors)
+if ($parseErrors.Count -gt 0) {
+    throw "Installer has PowerShell parse errors: $($parseErrors.Message -join '; ')"
+}
+$requiredInstallerPatterns = @(
+    '80GB',
+    '--list\s+--online',
+    '--install\s+Ubuntu-24\.04',
+    '--name\s+MediaServer',
+    '--location',
+    '--no-launch',
+    'DefaultDistribution',
+    'BasePath',
+    'SkipDistroInstall',
+    'PreflightOnly'
+)
+foreach ($pattern in $requiredInstallerPatterns) {
+    if ($installer -notmatch $pattern) { throw "Installer contract missing pattern: $pattern" }
+}
+if ($installer -notmatch 'PSChildName\.Trim\(''\{\}''\)\s+-eq\s+\$defaultId\.Trim\(''\{\}''\)') {
+    throw 'Installer must compare normalized WSL registry GUIDs'
+}
+if (-not $installer.Contains(".Replace('\', '/')") -or -not $installer.Contains("'/mnt/'")) {
+    throw 'Installer must convert its script path to /mnt/<drive> without wslpath'
+}
+$initializerPath = Join-Path $infraRoot 'linux\initialize-wsl.sh'
+if (-not (Test-Path -LiteralPath $initializerPath)) { throw "WSL initializer missing: $initializerPath" }
+$initializer = Get-Content -LiteralPath $initializerPath -Raw
+foreach ($pattern in @('systemd=true', 'default=media', 'metadata,uid=1000,gid=1000', 'useradd')) {
+    if ($initializer -notmatch [regex]::Escape($pattern)) {
+        throw "WSL initializer contract missing: $pattern"
+    }
+}
+if ($initializer -match 'NOPASSWD' -or $initializer -match 'groups\s+sudo') {
+    throw 'The media user must not receive broad sudo privileges'
+}
+
 Write-Output 'PASS static media-stack contract'
