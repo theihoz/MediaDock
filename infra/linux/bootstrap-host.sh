@@ -7,6 +7,10 @@ if [[ ${EUID} -ne 0 ]]; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+ipv4_precedence='precedence ::ffff:0:0/96  100'
+touch /etc/gai.conf
+grep -Fqx "$ipv4_precedence" /etc/gai.conf || printf '%s\n' "$ipv4_precedence" >>/etc/gai.conf
+
 apt-get update
 apt-get install -y ca-certificates curl gnupg jq
 

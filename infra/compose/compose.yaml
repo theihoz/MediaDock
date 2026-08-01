@@ -1,0 +1,206 @@
+x-logging: &default-logging
+  driver: json-file
+  options:
+    max-size: 10m
+    max-file: "3"
+
+x-lsio-environment: &lsio-environment
+  PUID: ${PUID}
+  PGID: ${PGID}
+  TZ: ${TZ}
+
+services:
+  jellyfin:
+    image: jellyfin/jellyfin:latest
+    container_name: jellyfin
+    user: "${PUID}:${PGID}"
+    runtime: nvidia
+    environment:
+      TZ: ${TZ}
+      NVIDIA_VISIBLE_DEVICES: all
+      NVIDIA_DRIVER_CAPABILITIES: compute,video,utility
+    ports:
+      - "8096:8096"
+    volumes:
+      - /srv/media-stack/appdata/jellyfin/config:/config
+      - /srv/media-stack/appdata/jellyfin/cache:/cache
+      - /mnt/d/Media/library:/data/library:ro
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://localhost:8096/health || exit 1"]
+      start_period: 30s
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  seerr:
+    image: ghcr.io/seerr-team/seerr:v3
+    container_name: jellyseerr
+    init: true
+    user: "${PUID}:${PGID}"
+    environment:
+      LOG_LEVEL: info
+      TZ: ${TZ}
+      PORT: 5055
+    ports:
+      - "5055:5055"
+    volumes:
+      - /srv/media-stack/appdata/seerr:/app/config
+    healthcheck:
+      test: ["CMD-SHELL", "wget --no-verbose --tries=1 --spider http://localhost:5055/api/v1/settings/public || exit 1"]
+      start_period: 30s
+      interval: 30s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  radarr:
+    image: lscr.io/linuxserver/radarr:latest
+    container_name: radarr
+    environment: *lsio-environment
+    ports: ["7878:7878"]
+    volumes:
+      - /srv/media-stack/appdata/radarr:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  sonarr:
+    image: lscr.io/linuxserver/sonarr:latest
+    container_name: sonarr
+    environment: *lsio-environment
+    ports: ["8989:8989"]
+    volumes:
+      - /srv/media-stack/appdata/sonarr:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  lidarr:
+    image: lscr.io/linuxserver/lidarr:latest
+    container_name: lidarr
+    environment: *lsio-environment
+    ports: ["8686:8686"]
+    volumes:
+      - /srv/media-stack/appdata/lidarr:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  prowlarr:
+    image: lscr.io/linuxserver/prowlarr:latest
+    container_name: prowlarr
+    environment: *lsio-environment
+    ports: ["9696:9696"]
+    volumes:
+      - /srv/media-stack/appdata/prowlarr:/config
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  bazarr:
+    image: lscr.io/linuxserver/bazarr:latest
+    container_name: bazarr
+    environment: *lsio-environment
+    ports: ["6767:6767"]
+    volumes:
+      - /srv/media-stack/appdata/bazarr:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  qbittorrent:
+    image: lscr.io/linuxserver/qbittorrent:latest
+    container_name: qbittorrent
+    environment:
+      <<: *lsio-environment
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
+    ports:
+      - "8081:8080"
+    volumes:
+      - /srv/media-stack/appdata/qbittorrent:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  sabnzbd:
+    image: lscr.io/linuxserver/sabnzbd:latest
+    container_name: sabnzbd
+    environment: *lsio-environment
+    ports: ["8085:8080"]
+    volumes:
+      - /srv/media-stack/appdata/sabnzbd:/config
+      - /mnt/d/Media:/data
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  autobrr:
+    image: ghcr.io/autobrr/autobrr:latest
+    container_name: autobrr
+    user: "${PUID}:${PGID}"
+    environment:
+      TZ: ${TZ}
+      AUTOBRR__HOST: 0.0.0.0
+      AUTOBRR__PORT: 7474
+      AUTOBRR__SESSION_SECRET: ${AUTOBRR_SESSION_SECRET}
+    ports: ["7474:7474"]
+    volumes:
+      - /srv/media-stack/appdata/autobrr:/config
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  flaresolverr:
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    container_name: flaresolverr
+    environment:
+      TZ: ${TZ}
+      LOG_LEVEL: info
+      LOG_HTML: "false"
+      CAPTCHA_SOLVER: none
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  cleanuparr:
+    image: ghcr.io/cleanuparr/cleanuparr:latest
+    container_name: cleanuparr
+    environment:
+      TZ: ${TZ}
+      PUID: ${PUID}
+      PGID: ${PGID}
+      PORT: 11011
+    ports: ["11011:11011"]
+    volumes:
+      - /srv/media-stack/appdata/cleanuparr:/config
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+  wizarr:
+    image: ghcr.io/wizarrrr/wizarr:latest
+    container_name: wizarr
+    environment:
+      TZ: ${TZ}
+    ports: ["5690:5690"]
+    volumes:
+      - /srv/media-stack/appdata/wizarr:/data/database
+    restart: unless-stopped
+    logging: *default-logging
+    networks: [media_internal]
+
+networks:
+  media_internal:
+    name: media_internal
+    driver: bridge

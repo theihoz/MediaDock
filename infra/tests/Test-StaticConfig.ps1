@@ -91,5 +91,10 @@ $bootstrap = Get-Content -LiteralPath $hostBootstrap -Raw
 foreach ($pattern in @('download.docker.com/linux/ubuntu', 'docker-ce', 'nvidia-container-toolkit', 'nvidia-ctk runtime configure', 'systemctl enable --now docker')) {
     if ($bootstrap -notmatch [regex]::Escape($pattern)) { throw "Host bootstrap contract missing: $pattern" }
 }
+if ($bootstrap -notmatch [regex]::Escape('precedence ::ffff:0:0/96  100')) {
+    throw 'Host bootstrap must prefer IPv4 when mirrored WSL has no IPv6 route'
+}
+$stackInstaller = Join-Path $infraRoot 'linux\deploy-stack-files.sh'
+if (-not (Test-Path -LiteralPath $stackInstaller)) { throw "Stack file installer missing: $stackInstaller" }
 
 Write-Output 'PASS static media-stack contract'
