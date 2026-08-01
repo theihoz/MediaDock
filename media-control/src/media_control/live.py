@@ -12,7 +12,7 @@ from .adapters import (
 )
 from .config import bazarr_api_key, qbit_password, sab_api_key, seerr_api_key, xml_api_key
 from .hub import MemoryHub
-from .models import MediaRequest
+from .models import AdminResource, MediaRequest
 
 
 class LiveHub(MemoryHub):
@@ -61,6 +61,7 @@ class LiveHub(MemoryHub):
         if changed:
             self.seerr.create_request(request.media_type, request.external_id, request.quality)
             self.requests[key] = request.model_dump()
+            self._save_admin()
         return {"operation_id": operation_id, "changed": changed, "state": "accepted",
                 "message": "Yêu cầu đã được chuyển tới Seerr"}, changed
 
@@ -81,6 +82,19 @@ class LiveHub(MemoryHub):
             except Exception:
                 continue
         return items
+
+    def delete_library(self, item_id: str) -> bool:
+        try:
+            media_type, raw_id = item_id.rsplit("-", 1)
+            adapter, resource = {
+                "movie": (self.radarr, "movie"),
+                "tv": (self.sonarr, "series"),
+                "music": (self.lidarr, "artist"),
+            }[media_type]
+            adapter.delete_media(resource, int(raw_id))
+            return True
+        except (KeyError, ValueError):
+            return False
 
     def downloads(self) -> list[dict[str, Any]]:
         jobs: list[dict[str, Any]] = []
@@ -103,6 +117,12 @@ class LiveHub(MemoryHub):
             pass
         return jobs
 
+    def subtitles(self) -> list[dict[str, Any]]:
+        try:
+            return self.bazarr.subtitle_items()
+        except Exception:
+            return []
+
     def operation(self, scope: str, target: str, action: str) -> dict[str, Any]:
         if scope == "download" and ":" in target:
             client, job_id = target.split(":", 1)
@@ -111,7 +131,101 @@ class LiveHub(MemoryHub):
             self.radarr.command("RescanMovie")
             self.sonarr.command("RescanSeries")
             self.lidarr.command("RescanFolders")
+        elif scope == "subtitle":
+            self.bazarr.subtitle_action(target, action)
         return super().operation(scope, target, action)
+
+    @staticmethod
+    def _schema_payload(
+        schemas: list[dict[str, Any]], resource: AdminResource,
+        ignored_settings: set[str] | None = None,
+    ) -> dict[str, Any]:
+        ignored = ignored_settings or set()
+        schema = next(
+            (item for item in schemas if item.get("implementation", "").casefold()
+             == resource.implementation.casefold()),
+            None,
+        )
+        if schema is None:
+            raise ValueError(f"Unknown implementation: {resource.implementation}")
+        payload = dict(schema)
+        payload["name"] = resource.name
+        payload["enable"] = resource.enabled
+        payload["fields"] = [dict(field) for field in schema.get("fields", [])]
+        known = {field.get("name"): field for field in payload["fields"]}
+        unknown = set(resource.settings) - set(known) - ignored
+        if unknown:
+            raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
+        for name, value in resource.settings.items():
+            if name not in ignored:
+                known[name]["value"] = value
+        return payload
+
+    @staticmethod
+    def _update_payload(
+        existing: dict[str, Any], settings: dict[str, Any], ignored: set[str] | None = None,
+    ) -> tuple[dict[str, Any], bool]:
+        ignored = ignored or set()
+        payload = dict(existing)
+        payload["fields"] = [dict(field) for field in existing.get("fields", [])]
+        known = {field.get("name"): field for field in payload["fields"]}
+        unknown = set(settings) - set(known) - ignored
+        if unknown:
+            raise ValueError(f"Unknown settings: {', '.join(sorted(unknown))}")
+        changed = False
+        for name, value in settings.items():
+            if name not in ignored and known[name].get("value") != value:
+                known[name]["value"] = value
+                changed = True
+        return payload, changed
+
+    def upsert_admin(self, kind: str, resource: AdminResource) -> tuple[dict[str, Any], bool]:
+        if kind == "providers":
+            key = resource.id or f"{resource.implementation}:{resource.name.casefold()}"
+            desired = resource.model_copy(update={"id": key}).model_dump()
+            if self.admin[kind].get(key) != desired:
+                self.bazarr.configure_provider(resource.implementation, resource.settings)
+        elif kind == "indexers" and any(resource.settings.values()):
+            current = self.prowlarr.get("indexer")
+            existing = next((item for item in current if
+                             item.get("name", "").casefold() == resource.name.casefold()
+                             and item.get("implementation", "").casefold()
+                             == resource.implementation.casefold()), None)
+            if existing:
+                payload, changed = self._update_payload(existing, resource.settings)
+                if changed:
+                    self.prowlarr.put(f"indexer/{existing['id']}", payload)
+            else:
+                payload = self._schema_payload(self.prowlarr.get("indexer/schema"), resource)
+                self.prowlarr.post("indexer", payload)
+        elif kind == "clients" and resource.implementation.casefold() != "integration":
+            service_name = str(resource.settings.get("service", "")).casefold()
+            service = {"radarr": self.radarr, "sonarr": self.sonarr, "lidarr": self.lidarr}.get(service_name)
+            if service is None:
+                raise ValueError("Download client requires service=radarr, sonarr, or lidarr")
+            current = service.get("downloadclient")
+            existing = next((item for item in current if
+                             item.get("implementation", "").casefold()
+                             == resource.implementation.casefold()), None)
+            if existing:
+                payload, changed = self._update_payload(
+                    existing, resource.settings, {"service"}
+                )
+                if changed:
+                    service.put(f"downloadclient/{existing['id']}", payload)
+            else:
+                payload = self._schema_payload(
+                    service.get("downloadclient/schema"), resource, {"service"}
+                )
+                service.post("downloadclient", payload)
+        elif kind == "profiles" and resource.implementation.casefold() == "rootfolder":
+            for service, setting in (
+                (self.radarr, "movies"), (self.sonarr, "tv"), (self.lidarr, "music")
+            ):
+                path = resource.settings.get(setting)
+                if path and not any(item.get("path") == path for item in service.get("rootfolder")):
+                    service.post("rootfolder", {"path": path})
+        return super().upsert_admin(kind, resource)
 
     def list_admin(self, kind: str) -> list[dict[str, Any]]:
         try:

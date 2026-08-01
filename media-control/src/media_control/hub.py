@@ -24,6 +24,7 @@ class MemoryHub:
             loaded = json.loads(state_path.read_text(encoding="utf-8"))
             for kind in self.admin:
                 self.admin[kind] = loaded.get(kind, {})
+            self.requests = loaded.get("requests", {})
         self.library_items = [
             {
                 "id": "movie-1",
@@ -70,6 +71,8 @@ class MemoryHub:
         operation_id = hashlib.sha256(key.encode()).hexdigest()[:16]
         changed = key not in self.requests
         self.requests.setdefault(key, request.model_dump())
+        if changed:
+            self._save_admin()
         return {
             "operation_id": operation_id, "changed": changed,
             "state": "accepted", "message": "Yêu cầu đã được ghi nhận",
@@ -119,5 +122,6 @@ class MemoryHub:
         if not self.state_path:
             return
         self.state_path.parent.mkdir(parents=True, exist_ok=True)
-        self.state_path.write_text(json.dumps(self.admin, indent=2) + "\n", encoding="utf-8")
+        document = {**self.admin, "requests": self.requests}
+        self.state_path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
         os.chmod(self.state_path, 0o600)

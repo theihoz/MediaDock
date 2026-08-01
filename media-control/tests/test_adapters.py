@@ -64,6 +64,20 @@ def test_seerr_search_normalizes_movie_and_tv_results() -> None:
     assert items[1]["title"] == "Dark"
 
 
+def test_seerr_4k_request_overrides_profile_without_fake_4k_server() -> None:
+    seen = {}
+
+    def request(request: httpx.Request) -> httpx.Response:
+        seen.update(__import__("json").loads(request.content))
+        return httpx.Response(201, json={"id": 1}, request=request)
+
+    adapter = SeerrAdapter(api_key="key", transport=httpx.MockTransport(request))
+    adapter.create_request("movie", "tmdb:123", "4k")
+    assert seen["profileId"] == 5
+    assert seen["rootFolder"] == "/data/library/movies"
+    assert seen["is4k"] is False
+
+
 def test_qbittorrent_logs_in_before_reading_jobs() -> None:
     paths: list[str] = []
 
@@ -76,3 +90,35 @@ def test_qbittorrent_logs_in_before_reading_jobs() -> None:
     adapter = QBittorrentAdapter(password="not-printed", transport=httpx.MockTransport(qbit))
     assert adapter.jobs() == []
     assert paths == ["/api/v2/auth/login", "/api/v2/torrents/info"]
+
+
+def test_servarr_delete_media_uses_delete_files_guard() -> None:
+    seen: list[httpx.Request] = []
+
+    def delete(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        return httpx.Response(200, json={}, request=request)
+
+    adapter = RadarrAdapter(api_key="key", transport=httpx.MockTransport(delete))
+    adapter.delete_media("movie", 42)
+    assert seen[0].url.path == "/api/v3/movie/42"
+    assert seen[0].url.params["deleteFiles"] == "true"
+
+
+def test_bazarr_normalizes_wanted_items_and_searches_vietnamese() -> None:
+    paths: list[tuple[str, str]] = []
+
+    def bazarr(request: httpx.Request) -> httpx.Response:
+        paths.append((request.method, request.url.path))
+        if request.url.path.endswith("/movies/wanted"):
+            return httpx.Response(200, json={"data": [{
+                "radarrId": 7, "title": "Arrival", "missing_subtitles": ["vi", "en"],
+            }]}, request=request)
+        return httpx.Response(200, json={"data": []}, request=request)
+
+    adapter = BazarrAdapter(api_key="key", transport=httpx.MockTransport(bazarr))
+    items = adapter.subtitle_items()
+    assert items[0]["id"] == "movie:7"
+    assert items[0]["vietnamese"] is False
+    adapter.subtitle_action("movie:7", "search")
+    assert ("PATCH", "/api/movies/subtitles") in paths

@@ -24,6 +24,7 @@ services:
       - /srv/media-stack/secrets/media-control.token:/run/secrets/media-control.token:ro
       - /srv/media-stack/secrets/qbittorrent.password:/run/secrets/qbittorrent.password:ro
       - /srv/media-stack/appdata:/service-config:ro
+      - /srv/media-stack/appdata/bazarr/config:/service-config/bazarr/config
       - /mnt/d/Media:/data:ro
       - /srv/media-stack/appdata/media-control:/state
     restart: unless-stopped

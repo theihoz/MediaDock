@@ -24,6 +24,9 @@ jq -e '.services["media-control"].ports[] | select(.host_ip == "127.0.0.1" and .
 jq -e '.services["media-control"].volumes[] | select(.source == "/srv/media-stack/secrets/media-control.token" and .target == "/run/secrets/media-control.token" and .read_only == true)' <<<"$config" >/dev/null || {
   echo 'FAIL media-control must mount the control token read-only' >&2; exit 1;
 }
+jq -e '.services["media-control"].volumes[] | select(.source == "/srv/media-stack/appdata/bazarr/config" and .target == "/service-config/bazarr/config" and .read_only != true)' <<<"$config" >/dev/null || {
+  echo 'FAIL media-control requires a narrowly scoped writable Bazarr config mount' >&2; exit 1;
+}
 jq -e '.services.seerr.dns == ["1.1.1.1", "8.8.8.8"]' <<<"$config" >/dev/null || {
   echo 'FAIL Seerr must bypass the router DNS block for TMDB' >&2; exit 1;
 }

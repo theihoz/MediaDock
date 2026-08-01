@@ -43,6 +43,12 @@ loopback-only, requires a bearer token stored at
 `/srv/media-stack/secrets/media-control.token` with mode `0600`, and never exposes
 service API keys to Flutter. Original service pages are diagnostic fallbacks only.
 
+Discovery requests use the existing HD profile by default. Selecting 4K overrides the
+single title to the installed Ultra-HD quality profile; it does not create a duplicate
+4K library or pretend that a second Radarr/Sonarr instance exists. Request idempotency
+keys are persisted inside the backend state so repeated clicks and backend restarts do
+not create duplicate requests.
+
 Hyper-V Firewall exposes the same ports only to `LocalSubnet` on the Windows Private profile. FlareSolverr stays internal and no router port forwarding is configured.
 
 ## Credentials and external accounts

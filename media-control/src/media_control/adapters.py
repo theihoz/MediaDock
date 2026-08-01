@@ -1,9 +1,28 @@
 from __future__ import annotations
 
+import os
 import time
+from pathlib import Path
 from typing import Any
 
 import httpx
+import yaml
+
+
+def configure_bazarr_provider(path: Path, implementation: str, settings: dict[str, Any]) -> None:
+    document = yaml.safe_load(path.read_text(encoding="utf-8"))
+    section_name = implementation.casefold()
+    if section_name not in document or not isinstance(document[section_name], dict):
+        raise ValueError("Unknown Bazarr provider implementation")
+    unknown = set(settings) - set(document[section_name])
+    if unknown:
+        raise ValueError(f"Unknown provider settings: {', '.join(sorted(unknown))}")
+    document[section_name].update(settings)
+    enabled = document.setdefault("general", {}).setdefault("enabled_providers", [])
+    if section_name not in enabled:
+        enabled.append(section_name)
+    path.write_text(yaml.safe_dump(document, sort_keys=False), encoding="utf-8")
+    os.chmod(path, 0o600)
 
 
 class ServiceAdapter:
@@ -83,7 +102,15 @@ class SeerrAdapter(ServiceAdapter):
         media_id = int(external_id.split(":")[-1])
         payload: dict[str, Any] = {"mediaType": media_type, "mediaId": media_id}
         if quality == "4k":
-            payload["is4k"] = True
+            # This server intentionally keeps one Arr instance per media type.
+            # Override the quality profile for this title instead of pretending
+            # that a second, separate 4K Arr instance exists.
+            payload.update({
+                "is4k": False,
+                "profileId": 5,
+                "rootFolder": "/data/library/movies" if media_type == "movie"
+                else "/data/library/tv",
+            })
         response = self.client.post("/api/v1/request", json=payload)
         if response.status_code not in {200, 201, 409}:
             response.raise_for_status()
@@ -103,6 +130,23 @@ class ServarrAdapter(ServiceAdapter):
         response = self.client.post(f"{self.api_prefix}/command", json={"name": name, **payload})
         response.raise_for_status()
         return response.json()
+
+    def post(self, resource: str, payload: dict[str, Any]) -> Any:
+        response = self.client.post(f"{self.api_prefix}/{resource.lstrip('/')}", json=payload)
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    def put(self, resource: str, payload: dict[str, Any]) -> Any:
+        response = self.client.put(f"{self.api_prefix}/{resource.lstrip('/')}", json=payload)
+        response.raise_for_status()
+        return response.json() if response.content else {}
+
+    def delete_media(self, resource: str, item_id: int) -> None:
+        response = self.client.delete(
+            f"{self.api_prefix}/{resource}/{item_id}",
+            params={"deleteFiles": "true", "addImportListExclusion": "false"},
+        )
+        response.raise_for_status()
 
 
 class RadarrAdapter(ServarrAdapter):
@@ -133,6 +177,78 @@ class BazarrAdapter(ServiceAdapter):
     name = "bazarr"
     base_url = "http://bazarr:6767"
     health_path = "/api/system/status"
+
+    def _get_data(self, path: str) -> list[dict[str, Any]]:
+        response = self.client.get(path, params={"start": 0, "length": 1000})
+        response.raise_for_status()
+        return response.json().get("data", [])
+
+    @staticmethod
+    def _missing_codes(raw: dict[str, Any]) -> set[str]:
+        values = raw.get("missing_subtitles") or []
+        return {
+            str(item.get("code2") or item.get("language") or "")
+            if isinstance(item, dict)
+            else str(item)
+            for item in values
+        }
+
+    def subtitle_items(self) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for raw in self._get_data("/api/movies/wanted"):
+            missing = self._missing_codes(raw)
+            radarr_id = raw.get("radarrId") or raw.get("radarrid")
+            items.append({
+                "id": f"movie:{radarr_id}", "media_id": f"movie-{radarr_id}",
+                "media_type": "movie", "title": raw.get("title", "Movie"),
+                "vietnamese": "vi" not in missing, "english": "en" not in missing,
+                "state": "missing" if missing else "available",
+            })
+        for raw in self._get_data("/api/episodes/wanted"):
+            missing = self._missing_codes(raw)
+            series_id = raw.get("sonarrSeriesId") or raw.get("seriesId")
+            episode_id = raw.get("sonarrEpisodeId") or raw.get("episodeId")
+            items.append({
+                "id": f"episode:{series_id}:{episode_id}",
+                "media_id": f"tv-{series_id}", "media_type": "tv",
+                "title": raw.get("seriesTitle") or raw.get("title") or "Episode",
+                "vietnamese": "vi" not in missing, "english": "en" not in missing,
+                "state": "missing" if missing else "available",
+            })
+        return items
+
+    def subtitle_action(self, item_id: str, action: str) -> None:
+        parts = item_id.split(":")
+        if parts[0] == "movie" and len(parts) == 2:
+            if action == "search":
+                response = self.client.patch("/api/movies/subtitles", params={
+                    "radarrid": parts[1], "language": "vi",
+                    "forced": "false", "hi": "false",
+                })
+            else:
+                response = self.client.patch(
+                    "/api/movies", params={"radarrid": parts[1], "action": "scan-disk"}
+                )
+        elif parts[0] == "episode" and len(parts) == 3:
+            if action == "search":
+                response = self.client.patch("/api/episodes/subtitles", params={
+                    "seriesid": parts[1], "episodeid": parts[2], "language": "vi",
+                    "forced": "false", "hi": "false",
+                })
+            else:
+                response = self.client.patch(
+                    "/api/series", params={"seriesid": parts[1], "action": "scan-disk"}
+                )
+        else:
+            raise ValueError("Invalid subtitle target")
+        response.raise_for_status()
+
+    def configure_provider(self, implementation: str, settings: dict[str, Any]) -> None:
+        configure_bazarr_provider(
+            Path("/service-config/bazarr/config/config.yaml"), implementation, settings
+        )
+        response = self.client.post("/api/providers", params={"action": "reset"})
+        response.raise_for_status()
 
 
 class QBittorrentAdapter(ServiceAdapter):
