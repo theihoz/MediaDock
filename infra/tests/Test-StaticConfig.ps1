@@ -22,6 +22,7 @@ if (Compare-Object ($expectedServices | Sort-Object) ($manifest.services | Sort-
     throw 'Service list does not match the approved stack'
 }
 if ([int]$manifest.ports.qbittorrent.host -ne 8081) { throw 'qBittorrent host port must be 8081' }
+if ([int]$manifest.ports.qbittorrent.container -ne 8081) { throw 'qBittorrent container WebUI port must match host port for CSRF validation' }
 if ($manifest.publishedLanPorts -contains 8191) { throw 'FlareSolverr must remain internal-only' }
 if (@($manifest.publishedLanPorts | Sort-Object -Unique).Count -ne @($manifest.publishedLanPorts).Count) {
     throw 'Published LAN ports must be unique'
@@ -96,5 +97,55 @@ if ($bootstrap -notmatch [regex]::Escape('precedence ::ffff:0:0/96  100')) {
 }
 $stackInstaller = Join-Path $infraRoot 'linux\deploy-stack-files.sh'
 if (-not (Test-Path -LiteralPath $stackInstaller)) { throw "Stack file installer missing: $stackInstaller" }
+$composePath = Join-Path $infraRoot 'compose\compose.yaml'
+$compose = Get-Content -LiteralPath $composePath -Raw
+if ($compose -notmatch 'WEBUI_PORT:\s*8081' -or $compose -notmatch '8081:8081') {
+    throw 'qBittorrent must use WEBUI_PORT 8081 and mapping 8081:8081'
+}
+
+$firewallPath = Join-Path $infraRoot 'windows\Configure-MediaFirewall.ps1'
+if (-not (Test-Path -LiteralPath $firewallPath)) { throw "Firewall configurator missing: $firewallPath" }
+$firewall = Get-Content -LiteralPath $firewallPath -Raw
+foreach ($pattern in @('New-NetFirewallHyperVRule', '40E0AC32-46A5-438A-A0B2-2B479E8F2E90', 'publishedLanPorts', 'RemoteAddresses LocalSubnet', 'Profiles Private', "@('127.0.0.1', '::1')")) {
+    if ($firewall -notmatch [regex]::Escape($pattern)) { throw "Firewall contract missing: $pattern" }
+}
+if ($firewall -match 'DefaultInboundAction\s+Allow') { throw 'Firewall must not broadly allow all WSL inbound traffic' }
+
+foreach ($name in @('Start-MediaServer.ps1', 'Stop-MediaServer.ps1', 'Status-MediaServer.ps1', 'Update-MediaServer.ps1')) {
+    $lifecyclePath = Join-Path $infraRoot "windows\$name"
+    if (-not (Test-Path -LiteralPath $lifecyclePath)) { throw "Lifecycle script missing: $lifecyclePath" }
+    $tokens = $null
+    $parseErrors = $null
+    [void][System.Management.Automation.Language.Parser]::ParseFile($lifecyclePath, [ref]$tokens, [ref]$parseErrors)
+    if ($parseErrors.Count -gt 0) { throw "$name has parse errors: $($parseErrors.Message -join '; ')" }
+}
+$startScript = Get-Content -LiteralPath (Join-Path $infraRoot 'windows\Start-MediaServer.ps1') -Raw
+if ($startScript -notmatch 'sleep' -or $startScript -notmatch 'infinity' -or $startScript -notmatch 'docker compose up -d') {
+    throw 'Start script must keep WSL alive and start the compose stack'
+}
+$stopScript = Get-Content -LiteralPath (Join-Path $infraRoot 'windows\Stop-MediaServer.ps1') -Raw
+if ($stopScript -notmatch 'docker compose down' -or $stopScript -notmatch '--terminate\s+MediaServer') {
+    throw 'Stop script must stop the stack and only terminate MediaServer'
+}
+$updateScript = Get-Content -LiteralPath (Join-Path $infraRoot 'windows\Update-MediaServer.ps1') -Raw
+foreach ($pattern in @('docker compose pull', 'docker compose config', 'docker compose up -d', 'previous-images')) {
+    if ($updateScript -notmatch [regex]::Escape($pattern)) { throw "Update contract missing: $pattern" }
+}
+
+$configuratorPath = Join-Path $infraRoot 'linux\configure-stack.py'
+if (-not (Test-Path -LiteralPath $configuratorPath)) { throw "Stack configurator missing: $configuratorPath" }
+$configurator = Get-Content -LiteralPath $configuratorPath -Raw
+foreach ($pattern in @('/data/library/movies', '/data/library/tv', '/data/library/music', 'HardwareAccelerationType', 'nvenc', 'awaiting_external_credentials')) {
+    if ($configurator -notmatch [regex]::Escape($pattern)) { throw "Stack configurator contract missing: $pattern" }
+}
+$integrationVerifier = Join-Path $infraRoot 'linux\verify-integrations.py'
+if (-not (Test-Path -LiteralPath $integrationVerifier)) { throw "Integration verifier missing: $integrationVerifier" }
+
+$readmePath = Join-Path (Split-Path -Parent $infraRoot) 'README.md'
+if (-not (Test-Path -LiteralPath $readmePath)) { throw "Operator README missing: $readmePath" }
+$readme = Get-Content -LiteralPath $readmePath -Raw
+foreach ($pattern in @('D:\WSL\Start-MediaServer.ps1', 'credentials', 'OpenSubtitles', 'LocalSubnet')) {
+    if ($readme -notmatch [regex]::Escape($pattern)) { throw "README contract missing: $pattern" }
+}
 
 Write-Output 'PASS static media-stack contract'

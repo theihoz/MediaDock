@@ -29,7 +29,7 @@
     "lidarr": { "host": 8686, "container": 8686 },
     "prowlarr": { "host": 9696, "container": 9696 },
     "bazarr": { "host": 6767, "container": 6767 },
-    "qbittorrent": { "host": 8081, "container": 8080 },
+    "qbittorrent": { "host": 8081, "container": 8081 },
     "sabnzbd": { "host": 8085, "container": 8080 },
     "autobrr": { "host": 7474, "container": 7474 },
     "flaresolverr": { "container": 8191 },

@@ -18,8 +18,8 @@ jq -e '[.services[] | select(.restart != "unless-stopped")] | length == 0' <<<"$
 jq -e '.services.flaresolverr.ports == null' <<<"$config" >/dev/null || {
   echo 'FAIL FlareSolverr must not publish a host port' >&2; exit 1;
 }
-jq -e '.services.qbittorrent.ports[] | select(.published == "8081" and .target == 8080)' <<<"$config" >/dev/null || {
-  echo 'FAIL qBittorrent must publish 8081:8080' >&2; exit 1;
+jq -e '.services.qbittorrent.ports[] | select(.published == "8081" and .target == 8081)' <<<"$config" >/dev/null || {
+  echo 'FAIL qBittorrent must publish 8081:8081' >&2; exit 1;
 }
 
 for service in radarr sonarr lidarr bazarr qbittorrent sabnzbd; do

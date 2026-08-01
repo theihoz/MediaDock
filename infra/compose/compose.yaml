@@ -122,10 +122,10 @@ services:
     container_name: qbittorrent
     environment:
       <<: *lsio-environment
-      WEBUI_PORT: 8080
+      WEBUI_PORT: 8081
       TORRENTING_PORT: 6881
     ports:
-      - "8081:8080"
+      - "8081:8081"
     volumes:
       - /srv/media-stack/appdata/qbittorrent:/config
       - /mnt/d/Media:/data

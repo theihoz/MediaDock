@@ -4,3 +4,5 @@ credentials*
 deployment-report.json
 infra/runtime/
 appdata/
+__pycache__/
+*.py[cod]
