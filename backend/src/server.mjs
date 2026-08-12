@@ -9,6 +9,7 @@ import { filterSubtitleResults, mergeSubtitleResults, normalizeSubtitle, shouldU
 import { createSubtitleToken, verifySubtitleToken } from './subtitle-token.mjs';
 import { safeArchiveEntry, safeSubtitleName, validateSubtitlePayload } from './subtitle-files.mjs';
 import { YifyDirectProvider } from './yify-direct.mjs';
+import { JsonTrendingStore, TrendingMovies, createSeerrFetcher } from './trending-movies.mjs';
 
 const registry = createServiceRegistry({
   qbittorrent: { url: process.env.QBITTORRENT_URL ?? 'http://qbittorrent:8080' },
@@ -38,6 +39,13 @@ const subtitleTokenSecret = process.env.SUBTITLE_TOKEN_SECRET ?? 'local-developm
 const yify = new YifyDirectProvider({
   enabled: process.env.YIFY_DIRECT_ENABLED === 'true',
   baseUrl: process.env.YIFY_DIRECT_BASE_URL ?? '',
+});
+const trending = new TrendingMovies({
+  fetchPage: createSeerrFetcher({
+    baseUrl: registry.seerr.url,
+    configPath: process.env.SEERR_CONFIG ?? '/service-config/seerr/settings.json',
+  }),
+  store: new JsonTrendingStore(process.env.TRENDING_CACHE ?? '/data/cache/trending.json'),
 });
 const execFileAsync = promisify(execFile);
 
@@ -92,6 +100,7 @@ async function route(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { status: 'ready' });
   if (req.method === 'GET' && url.pathname === '/v1/services') return send(res, 200, Object.values(registry).map(publicService));
+  if (req.method === 'GET' && url.pathname === '/v1/movies/trending') return send(res, 200, await trending.get());
   if (req.method === 'GET' && url.pathname === '/v1/movies/search') return send(res, 200, await media.searchMovies(url.searchParams.get('q') ?? ''));
 
   let match = url.pathname.match(/^\/v1\/movies\/(\d+)$/);
