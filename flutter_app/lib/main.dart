@@ -70,10 +70,6 @@ class _MediaShellState extends State<MediaShell> {
   late final Api api;
   late final ControllerBootstrapper bootstrapper;
   ControllerStartupResult? controllerState;
-  late final pages = <Widget>[
-    OverviewPage(api: api), MovieSearchPage(api: api), DownloadsPage(api: api),
-    SubtitlesPage(api: api), LibraryPage(api: api), ServicesPage(api: api), SettingsPage(config: api.config),
-  ];
   static const destinations = [
     NavigationRailDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: Text('Tổng quan')),
     NavigationRailDestination(icon: Icon(Icons.search), label: Text('Tìm phim')),
@@ -111,6 +107,16 @@ class _MediaShellState extends State<MediaShell> {
     if (mounted) setState(() => controllerState = result);
   }
 
+  Widget selectedPage() => switch (selected) {
+    0 => OverviewPage(api: api),
+    1 => MovieSearchPage(api: api),
+    2 => DownloadsPage(api: api),
+    3 => SubtitlesPage(api: api),
+    4 => LibraryPage(api: api),
+    5 => ServicesPage(api: api),
+    _ => SettingsPage(config: api.config),
+  };
+
   @override
   Widget build(BuildContext context) {
     if (controllerState == null) {
@@ -145,7 +151,7 @@ class _MediaShellState extends State<MediaShell> {
         body: Row(children: [
           NavigationRail(selectedIndex: selected, labelType: NavigationRailLabelType.all, destinations: destinations, onDestinationSelected: (v) => setState(() => selected = v)),
           const VerticalDivider(width: 1),
-          Expanded(child: IndexedStack(index: selected, children: pages)),
+          Expanded(child: selectedPage()),
         ]),
       );
   }
@@ -216,15 +222,85 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
   List<dynamic> movies = [], releases = [];
   Map<String, dynamic>? selected;
   bool busy = false;
+  bool showingSearch = false;
+  bool stale = false;
   String? error;
-  Future<void> search() async { try { setState(() { busy = true; error = null; selected = null; }); final x = await widget.api.gateway('/v1/movies/search?q=${Uri.encodeQueryComponent(query.text)}'); if (!mounted) return; setState(() { movies = x; releases = []; }); } catch (e) { if (mounted) setState(() => error = '$e'); } finally { if (mounted) setState(() => busy = false); } }
+  @override void initState() { super.initState(); loadTrending(); }
+  Future<void> loadTrending() async {
+    try {
+      setState(() { busy = true; error = null; selected = null; showingSearch = false; });
+      final result = await widget.api.gateway('/v1/movies/trending');
+      if (!mounted) return;
+      setState(() {
+        movies = result is List ? result : (result['items'] ?? []);
+        stale = result is Map && result['stale'] == true;
+        releases = [];
+      });
+    } catch (_) {
+      if (mounted) setState(() { movies = []; error = 'Chưa tải được phim thịnh hành'; });
+    } finally { if (mounted) setState(() => busy = false); }
+  }
+  Future<void> search() async {
+    final term = query.text.trim();
+    if (term.isEmpty) return loadTrending();
+    try {
+      setState(() { busy = true; error = null; selected = null; showingSearch = true; stale = false; });
+      final result = await widget.api.gateway('/v1/movies/search?q=${Uri.encodeQueryComponent(term)}');
+      if (!mounted) return;
+      setState(() { movies = result; releases = []; });
+    } catch (_) {
+      if (mounted) setState(() { movies = []; error = 'Không thể tìm phim lúc này'; });
+    } finally { if (mounted) setState(() => busy = false); }
+  }
   Future<void> loadReleases(Map<String, dynamic> movie) async { try { setState(() { selected = movie; busy = true; error = null; releases = []; }); final x = await widget.api.gateway('/v1/movies/${movie['tmdbId']}/releases'); if (!mounted) return; setState(() => releases = x); } catch (e) { if (mounted) setState(() => error = '$e'); } finally { if (mounted) setState(() => busy = false); } }
   Future<void> download(Map<String, dynamic> release) async { try { await widget.api.gateway('/v1/movies/${selected!['tmdbId']}/download', method: 'POST', body: {'guid': release['guid'], 'indexerId': release['indexerId']}); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã gửi bản tải sang Radarr/qBittorrent'))); } catch (e) { if (mounted) showError(context, e); } }
   @override void dispose() { query.dispose(); super.dispose(); }
   @override Widget build(BuildContext context) => PageFrame(title: selected == null ? 'Tìm phim' : 'Chi tiết phim', child: selected == null ? Column(children: [
-    Row(children: [Expanded(child: TextField(controller: query, onSubmitted: (_) => search(), decoration: const InputDecoration(labelText: 'Tên phim', prefixIcon: Icon(Icons.search)))), const SizedBox(width: 12), FilledButton(onPressed: busy ? null : search, child: const Text('Tìm'))]),
+    Row(children: [Expanded(child: TextField(
+      controller: query,
+      textInputAction: TextInputAction.search,
+      onChanged: (_) => setState(() {}),
+      onSubmitted: (_) => search(),
+      decoration: InputDecoration(
+        labelText: 'Tên phim',
+        prefixIcon: const Icon(Icons.search),
+        suffixIcon: query.text.isEmpty ? null : IconButton(onPressed: () { query.clear(); loadTrending(); }, icon: const Icon(Icons.clear)),
+      ),
+    )), const SizedBox(width: 12), FilledButton(onPressed: busy ? null : search, child: const Text('Tìm'))]),
     const SizedBox(height: 12), if (busy) const LinearProgressIndicator(), if (error != null) Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
-    Expanded(child: movies.isEmpty && !busy ? const Center(child: Text('Nhập tên phim để tìm kiếm')) : ListView(children: movies.map((m) => Card(child: ListTile(leading: m['poster'] != null ? Image.network(m['poster'], width: 44, errorBuilder: (_, __, ___) => const Icon(Icons.movie)) : const Icon(Icons.movie), title: Text('${m['title']} (${m['year'] ?? ''})'), subtitle: Text(m['overview'] ?? '', maxLines: 2, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.chevron_right), onTap: () => loadReleases(Map<String, dynamic>.from(m))))).toList())),
+    if (!busy) Align(alignment: Alignment.centerLeft, child: Padding(
+      padding: const EdgeInsets.symmetric(vertical: 10),
+      child: Row(children: [
+        Text(showingSearch ? 'Kết quả tìm kiếm' : 'Đang thịnh hành', style: Theme.of(context).textTheme.titleLarge),
+        if (stale) const Padding(padding: EdgeInsets.only(left: 10), child: Chip(label: Text('Dữ liệu gần nhất'))),
+      ]),
+    )),
+    Expanded(child: movies.isEmpty && !busy
+      ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+          Text(showingSearch ? 'Không tìm thấy phim' : 'Chưa tải được phim thịnh hành'),
+          const SizedBox(height: 10),
+          OutlinedButton.icon(onPressed: showingSearch ? search : loadTrending, icon: const Icon(Icons.refresh), label: const Text('Thử lại')),
+        ]))
+      : LayoutBuilder(builder: (context, constraints) {
+          final columns = (constraints.maxWidth / 210).floor().clamp(2, 7);
+          return GridView.builder(
+            gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(crossAxisCount: columns, childAspectRatio: .64, crossAxisSpacing: 12, mainAxisSpacing: 12),
+            itemCount: movies.length,
+            itemBuilder: (_, index) {
+              final movie = Map<String, dynamic>.from(movies[index]);
+              return Card(clipBehavior: Clip.antiAlias, child: InkWell(
+                onTap: () => loadReleases(movie),
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Expanded(child: SizedBox(width: double.infinity, child: movie['poster'] != null
+                    ? Image.network(movie['poster'], fit: BoxFit.cover, errorBuilder: (_, __, ___) => const Center(child: Icon(Icons.movie, size: 48)))
+                    : const Center(child: Icon(Icons.movie, size: 48)))),
+                  Padding(padding: const EdgeInsets.fromLTRB(10, 9, 10, 2), child: Text('${movie['title']} (${movie['year'] ?? ''})', maxLines: 2, overflow: TextOverflow.ellipsis)),
+                  Padding(padding: const EdgeInsets.fromLTRB(10, 0, 10, 9), child: Text(movie['rating'] == null ? 'Nhấn để xem bản tải' : '★ ${movie['rating']}', style: Theme.of(context).textTheme.bodySmall)),
+                ]),
+              ));
+            },
+          );
+        })),
   ]) : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
     TextButton.icon(onPressed: busy ? null : () => setState(() { selected = null; releases = []; error = null; }), icon: const Icon(Icons.arrow_back), label: const Text('Quay lại kết quả')),
     Text('${selected!['title']} (${selected!['year'] ?? ''})', style: Theme.of(context).textTheme.headlineSmall),
