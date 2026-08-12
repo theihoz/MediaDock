@@ -15,6 +15,13 @@ export function composeArgs(action, service) {
   return ['compose', action, ...(service ? [service] : [])];
 }
 
+export function wholeStackCommands(action) {
+  if (action === 'start') return [['compose', 'start'], ['compose', 'up', '-d']];
+  if (action === 'stop') return [['compose', 'stop']];
+  if (action === 'restart') return [['compose', 'restart']];
+  throw new Error(`Unsupported action: ${action}`);
+}
+
 export function canStopService(service, running) {
   if (service === 'postgres' && running.has('api')) return { allowed: false, reason: 'api depends on postgres' };
   if (service === 'redis' && running.has('api')) return { allowed: false, reason: 'api depends on redis' };

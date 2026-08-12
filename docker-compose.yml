@@ -1,7 +1,7 @@
 name: media-stack
 
 x-common: &common
-  restart: unless-stopped
+  restart: "no"
   networks: [media]
 
 x-arr-environment: &arr-environment
@@ -12,7 +12,7 @@ x-arr-environment: &arr-environment
 services:
   postgres:
     image: postgres:16-alpine
-    restart: unless-stopped
+    restart: "no"
     environment:
       POSTGRES_DB: media
       POSTGRES_USER: media
@@ -27,7 +27,7 @@ services:
 
   redis:
     image: redis:7-alpine
-    restart: unless-stopped
+    restart: "no"
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
     volumes: ["redis_data:/data"]
     healthcheck:
@@ -116,7 +116,7 @@ services:
 
   api:
     build: ./backend
-    restart: unless-stopped
+    restart: "no"
     depends_on:
       postgres: { condition: service_healthy }
       redis: { condition: service_healthy }

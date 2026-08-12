@@ -1,7 +1,7 @@
 import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { authorize, canStopService, composeArgs, services } from './controller.mjs';
+import { authorize, canStopService, composeArgs, services, wholeStackCommands } from './controller.mjs';
 
 const exec = promisify(execFile);
 const port = Number(process.env.HOST_CONTROLLER_PORT ?? 3210);
@@ -50,7 +50,11 @@ async function handle(req, res) {
 
   const whole = url.pathname.match(/^\/host\/(start|stop|restart)$/);
   if (req.method === 'POST' && whole) {
-    await compose(composeArgs(whole[1]).slice(1));
+    const commands = wholeStackCommands(whole[1]);
+    const command = whole[1] === 'start' && (await listServices()).length === 0
+      ? commands[1]
+      : commands[0];
+    await compose(command.slice(1));
     return send(res, 202, { state: `${whole[1]}ing` });
   }
 

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { authorize, composeArgs, canStopService } from '../src/controller.mjs';
+import { authorize, composeArgs, canStopService, wholeStackCommands } from '../src/controller.mjs';
 
 test('rejects requests without the local bearer token', () => {
   assert.equal(authorize({}, 'local-token'), false);
@@ -21,4 +21,14 @@ test('protects infrastructure dependencies while api is running', () => {
     reason: 'api depends on postgres',
   });
   assert.equal(canStopService('radarr', new Set(['api'])).allowed, true);
+});
+
+test('whole stack start prefers existing stopped containers', () => {
+  assert.deepEqual(wholeStackCommands('start'), [
+    ['compose', 'start'],
+    ['compose', 'up', '-d'],
+  ]);
+  assert.deepEqual(wholeStackCommands('stop'), [['compose', 'stop']]);
+  assert.deepEqual(wholeStackCommands('restart'), [['compose', 'restart']]);
+  assert.throws(() => wholeStackCommands('remove'), /Unsupported action/);
 });
