@@ -1,6 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:media_control/controller_bootstrap.dart';
 import 'package:media_control/main.dart';
+
+class FakeBootstrapper extends ControllerBootstrapper {
+  FakeBootstrapper(this.result)
+      : super(probe: () async => false, launch: () async {});
+  final Future<ControllerStartupResult> result;
+  @override
+  Future<ControllerStartupResult> ensureReady() => result;
+}
 
 class FakeMovieApi extends Api {
   FakeMovieApi() : super(const LocalConfig());
@@ -12,11 +21,17 @@ class FakeMovieApi extends Api {
     if (path == '/v1/movies/603/releases') return [];
     throw StateError('Unexpected request: $path');
   }
+  @override
+  Future<dynamic> host(String path, {String method = 'GET'}) async => {'state': 'off', 'services': []};
 }
 
 void main() {
   testWidgets('shows readable Vietnamese media navigation', (tester) async {
-    await tester.pumpWidget(const MediaControlApp());
+    await tester.pumpWidget(MediaControlApp(
+      api: FakeMovieApi(),
+      bootstrapper: FakeBootstrapper(Future.value(ControllerStartupResult.ready)),
+    ));
+    await tester.pumpAndSettle();
 
     expect(find.text('Media Control'), findsOneWidget);
     expect(find.text('Tổng quan'), findsWidgets);
@@ -44,5 +59,19 @@ void main() {
     expect(find.text('Chi tiết phim'), findsOneWidget);
     expect(find.text('Không tìm thấy bản tải phù hợp'), findsOneWidget);
     expect(find.text('Quay lại kết quả'), findsOneWidget);
+  });
+
+  testWidgets('shows a friendly controller failure without raw socket details', (tester) async {
+    await tester.pumpWidget(MaterialApp(
+      home: MediaShell(
+        api: FakeMovieApi(),
+        bootstrapper: FakeBootstrapper(Future.value(ControllerStartupResult.failed)),
+      ),
+    ));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Không thể khởi động bộ điều khiển cục bộ'), findsOneWidget);
+    expect(find.text('Thử lại'), findsOneWidget);
+    expect(find.textContaining('SocketException'), findsNothing);
   });
 }

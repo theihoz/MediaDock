@@ -1,4 +1,8 @@
 $ErrorActionPreference = 'Stop'
+$createdNew = $false
+$mutex = New-Object System.Threading.Mutex($true, 'Local\MediaControlHostController', [ref]$createdNew)
+if (-not $createdNew) { exit 0 }
+
 $ProjectDir = Split-Path -Parent $PSScriptRoot
 $EnvPath = Join-Path $ProjectDir '.env'
 $values = @{}
@@ -9,5 +13,11 @@ $env:HOST_CONTROLLER_TOKEN = $values['HOST_CONTROLLER_TOKEN']
 $env:HOST_CONTROLLER_PORT = '3210'
 $env:MEDIA_PROJECT_DIR = $ProjectDir
 $env:COMPOSE_ENV_FILE = Join-Path $ProjectDir '.env.compose'
-$env:DOCKER_EXE = (Get-Command docker.exe).Source
-node (Join-Path $ProjectDir 'host-controller\src\server.mjs')
+$dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue
+$env:DOCKER_EXE = if ($dockerCommand) { $dockerCommand.Source } else { 'docker' }
+try {
+  node (Join-Path $ProjectDir 'host-controller\src\server.mjs')
+} finally {
+  $mutex.ReleaseMutex()
+  $mutex.Dispose()
+}

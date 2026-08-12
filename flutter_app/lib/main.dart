@@ -1,30 +1,39 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:media_control/controller_bootstrap.dart';
 
 void main() => runApp(const MediaControlApp());
 
 class MediaControlApp extends StatelessWidget {
-  const MediaControlApp({super.key});
+  const MediaControlApp({super.key, this.api, this.bootstrapper});
+  final Api? api;
+  final ControllerBootstrapper? bootstrapper;
   @override
   Widget build(BuildContext context) => MaterialApp(
         title: 'Media Control',
         debugShowCheckedModeBanner: false,
         theme: ThemeData(colorSchemeSeed: Colors.teal, brightness: Brightness.dark, useMaterial3: true),
-        home: const MediaShell(),
+        home: MediaShell(api: api, bootstrapper: bootstrapper),
       );
 }
 
 class LocalConfig {
-  const LocalConfig({this.gateway = 'http://localhost:3000', this.controller = 'http://127.0.0.1:3210', this.token = 'media-control-local'});
-  final String gateway, controller, token;
+  const LocalConfig({this.gateway = 'http://localhost:3000', this.controller = 'http://127.0.0.1:3210', this.token = 'media-control-local', this.controllerLauncher = ''});
+  final String gateway, controller, token, controllerLauncher;
   static LocalConfig load() {
     try {
       final base = Platform.environment['LOCALAPPDATA'];
       final data = jsonDecode(File('$base\\MediaControl\\config.json').readAsStringSync());
-      return LocalConfig(gateway: data['gateway'], controller: data['controller'], token: data['token']);
+      return LocalConfig(
+        gateway: data['gateway'] ?? 'http://localhost:3000',
+        controller: data['controller'] ?? 'http://127.0.0.1:3210',
+        token: data['token'] ?? 'media-control-local',
+        controllerLauncher: data['controllerLauncher'] ?? '',
+      );
     } catch (_) {
       return const LocalConfig();
     }
@@ -49,14 +58,18 @@ class Api {
 }
 
 class MediaShell extends StatefulWidget {
-  const MediaShell({super.key});
+  const MediaShell({super.key, this.api, this.bootstrapper});
+  final Api? api;
+  final ControllerBootstrapper? bootstrapper;
   @override
   State<MediaShell> createState() => _MediaShellState();
 }
 
 class _MediaShellState extends State<MediaShell> {
   int selected = 0;
-  late final Api api = Api(LocalConfig.load());
+  late final Api api;
+  late final ControllerBootstrapper bootstrapper;
+  ControllerStartupResult? controllerState;
   late final pages = <Widget>[
     OverviewPage(api: api), MovieSearchPage(api: api), DownloadsPage(api: api),
     SubtitlesPage(api: api), LibraryPage(api: api), ServicesPage(api: api), SettingsPage(config: api.config),
@@ -71,7 +84,63 @@ class _MediaShellState extends State<MediaShell> {
     NavigationRailDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('Cài đặt')),
   ];
   @override
-  Widget build(BuildContext context) => Scaffold(
+  void initState() {
+    super.initState();
+    api = widget.api ?? Api(LocalConfig.load());
+    bootstrapper = widget.bootstrapper ?? ControllerBootstrapper(
+      probe: () async {
+        await api.host('/host/status').timeout(const Duration(seconds: 2));
+        return true;
+      },
+      launch: () async {
+        final launcher = api.config.controllerLauncher;
+        if (launcher.isEmpty) throw StateError('controller launcher is not configured');
+        await Process.start(
+          'powershell.exe',
+          ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', launcher],
+          mode: ProcessStartMode.detached,
+        );
+      },
+    );
+    recoverController();
+  }
+
+  Future<void> recoverController() async {
+    if (mounted) setState(() => controllerState = null);
+    final result = await bootstrapper.ensureReady();
+    if (mounted) setState(() => controllerState = result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    if (controllerState == null) {
+      return const Scaffold(body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        CircularProgressIndicator(), SizedBox(height: 16), Text('Đang kết nối bộ điều khiển…'),
+      ])));
+    }
+    if (controllerState == ControllerStartupResult.failed) {
+      return Scaffold(body: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+        const Icon(Icons.desktop_access_disabled, size: 52),
+        const SizedBox(height: 16),
+        const Text('Không thể khởi động bộ điều khiển cục bộ'),
+        const SizedBox(height: 12),
+        Wrap(spacing: 12, children: [
+          FilledButton.icon(onPressed: recoverController, icon: const Icon(Icons.refresh), label: const Text('Thử lại')),
+          OutlinedButton.icon(
+            onPressed: () => showDialog<void>(context: context, builder: (_) => AlertDialog(
+              title: const Text('Cài đặt cục bộ'),
+              content: SelectableText(api.config.controllerLauncher.isEmpty
+                  ? 'Chưa cấu hình đường dẫn bộ điều khiển.'
+                  : api.config.controllerLauncher),
+              actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Đóng'))],
+            )),
+            icon: const Icon(Icons.settings),
+            label: const Text('Cài đặt'),
+          ),
+        ]),
+      ])));
+    }
+    return Scaffold(
         appBar: AppBar(title: const Text('Media Control')),
         body: Row(children: [
           NavigationRail(selectedIndex: selected, labelType: NavigationRailLabelType.all, destinations: destinations, onDestinationSelected: (v) => setState(() => selected = v)),
@@ -79,6 +148,7 @@ class _MediaShellState extends State<MediaShell> {
           Expanded(child: IndexedStack(index: selected, children: pages)),
         ]),
       );
+  }
 }
 
 class PageFrame extends StatelessWidget {
@@ -96,7 +166,12 @@ class PageFrame extends StatelessWidget {
       );
 }
 
-void showError(BuildContext context, Object error) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+void showError(BuildContext context, Object error) {
+  final message = error is SocketException || error is TimeoutException
+      ? 'Dịch vụ cục bộ chưa sẵn sàng. Hãy thử lại.'
+      : '$error';
+  ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
+}
 
 class OverviewPage extends StatefulWidget {
   const OverviewPage({super.key, required this.api});
