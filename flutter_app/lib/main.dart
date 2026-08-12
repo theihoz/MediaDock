@@ -1,0 +1,269 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+
+void main() => runApp(const MediaControlApp());
+
+class MediaControlApp extends StatelessWidget {
+  const MediaControlApp({super.key});
+  @override
+  Widget build(BuildContext context) => MaterialApp(
+        title: 'Media Control',
+        debugShowCheckedModeBanner: false,
+        theme: ThemeData(colorSchemeSeed: Colors.teal, brightness: Brightness.dark, useMaterial3: true),
+        home: const MediaShell(),
+      );
+}
+
+class LocalConfig {
+  const LocalConfig({this.gateway = 'http://localhost:3000', this.controller = 'http://127.0.0.1:3210', this.token = 'media-control-local'});
+  final String gateway, controller, token;
+  static LocalConfig load() {
+    try {
+      final base = Platform.environment['LOCALAPPDATA'];
+      final data = jsonDecode(File('$base\\MediaControl\\config.json').readAsStringSync());
+      return LocalConfig(gateway: data['gateway'], controller: data['controller'], token: data['token']);
+    } catch (_) {
+      return const LocalConfig();
+    }
+  }
+}
+
+class Api {
+  Api(this.config);
+  final LocalConfig config;
+  Future<dynamic> request(String base, String path, {String method = 'GET', Object? body}) async {
+    final headers = <String, String>{'content-type': 'application/json'};
+    if (base == config.controller) headers['authorization'] = 'Bearer ${config.token}';
+    final request = http.Request(method, Uri.parse('$base$path'))..headers.addAll(headers);
+    if (body != null) request.body = jsonEncode(body);
+    final response = await request.send();
+    final text = await response.stream.bytesToString();
+    if (response.statusCode < 200 || response.statusCode >= 300) throw Exception(text.isEmpty ? 'HTTP ${response.statusCode}' : text);
+    return text.isEmpty ? null : jsonDecode(text);
+  }
+  Future<dynamic> gateway(String path, {String method = 'GET', Object? body}) => request(config.gateway, path, method: method, body: body);
+  Future<dynamic> host(String path, {String method = 'GET'}) => request(config.controller, path, method: method);
+}
+
+class MediaShell extends StatefulWidget {
+  const MediaShell({super.key});
+  @override
+  State<MediaShell> createState() => _MediaShellState();
+}
+
+class _MediaShellState extends State<MediaShell> {
+  int selected = 0;
+  late final Api api = Api(LocalConfig.load());
+  late final pages = <Widget>[
+    OverviewPage(api: api), MovieSearchPage(api: api), DownloadsPage(api: api),
+    SubtitlesPage(api: api), LibraryPage(api: api), ServicesPage(api: api), SettingsPage(config: api.config),
+  ];
+  static const destinations = [
+    NavigationRailDestination(icon: Icon(Icons.dashboard_outlined), selectedIcon: Icon(Icons.dashboard), label: Text('Tổng quan')),
+    NavigationRailDestination(icon: Icon(Icons.search), label: Text('Tìm phim')),
+    NavigationRailDestination(icon: Icon(Icons.downloading_outlined), selectedIcon: Icon(Icons.downloading), label: Text('Downloads')),
+    NavigationRailDestination(icon: Icon(Icons.subtitles_outlined), selectedIcon: Icon(Icons.subtitles), label: Text('Phụ đề')),
+    NavigationRailDestination(icon: Icon(Icons.video_library_outlined), selectedIcon: Icon(Icons.video_library), label: Text('Thư viện')),
+    NavigationRailDestination(icon: Icon(Icons.dns_outlined), selectedIcon: Icon(Icons.dns), label: Text('Services')),
+    NavigationRailDestination(icon: Icon(Icons.settings_outlined), selectedIcon: Icon(Icons.settings), label: Text('Cài đặt')),
+  ];
+  @override
+  Widget build(BuildContext context) => Scaffold(
+        appBar: AppBar(title: const Text('Media Control')),
+        body: Row(children: [
+          NavigationRail(selectedIndex: selected, labelType: NavigationRailLabelType.all, destinations: destinations, onDestinationSelected: (v) => setState(() => selected = v)),
+          const VerticalDivider(width: 1),
+          Expanded(child: IndexedStack(index: selected, children: pages)),
+        ]),
+      );
+}
+
+class PageFrame extends StatelessWidget {
+  const PageFrame({super.key, required this.title, required this.child, this.actions = const []});
+  final String title;
+  final Widget child;
+  final List<Widget> actions;
+  @override
+  Widget build(BuildContext context) => Padding(
+        padding: const EdgeInsets.all(24),
+        child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Row(children: [Expanded(child: Text(title, style: Theme.of(context).textTheme.headlineMedium)), ...actions]),
+          const SizedBox(height: 18), Expanded(child: child),
+        ]),
+      );
+}
+
+void showError(BuildContext context, Object error) => ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$error')));
+
+class OverviewPage extends StatefulWidget {
+  const OverviewPage({super.key, required this.api});
+  final Api api;
+  @override State<OverviewPage> createState() => _OverviewPageState();
+}
+
+class _OverviewPageState extends State<OverviewPage> {
+  Map<String, dynamic>? status;
+  bool busy = false;
+  @override void initState() { super.initState(); refresh(); }
+  Future<void> refresh() async {
+    try { final value = await widget.api.host('/host/status'); if (mounted) setState(() => status = value); } catch (e) { if (mounted) showError(context, e); }
+  }
+  Future<void> action(String value) async {
+    setState(() => busy = true);
+    try { await widget.api.host('/host/$value', method: 'POST'); await refresh(); } catch (e) { if (mounted) showError(context, e); }
+    if (mounted) setState(() => busy = false);
+  }
+  @override Widget build(BuildContext context) => PageFrame(
+    title: 'Tổng quan', actions: [IconButton(onPressed: busy ? null : refresh, icon: const Icon(Icons.refresh))],
+    child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      Wrap(spacing: 12, children: [
+        FilledButton.icon(onPressed: busy ? null : () => action('start'), icon: const Icon(Icons.power_settings_new), label: const Text('Bật server')),
+        OutlinedButton.icon(onPressed: busy ? null : () => action('restart'), icon: const Icon(Icons.restart_alt), label: const Text('Restart')),
+        OutlinedButton.icon(onPressed: busy ? null : () => action('stop'), icon: const Icon(Icons.stop_circle_outlined), label: const Text('Tắt server')),
+      ]),
+      const SizedBox(height: 24), Text('Trạng thái: ${status?['state'] ?? 'đang kiểm tra'}'),
+      if (busy) const Padding(padding: EdgeInsets.only(top: 12), child: LinearProgressIndicator()),
+    ]),
+  );
+}
+
+class MovieSearchPage extends StatefulWidget {
+  const MovieSearchPage({super.key, required this.api});
+  final Api api;
+  @override State<MovieSearchPage> createState() => _MovieSearchPageState();
+}
+
+class _MovieSearchPageState extends State<MovieSearchPage> {
+  final query = TextEditingController();
+  List<dynamic> movies = [], releases = [];
+  Map<String, dynamic>? selected;
+  bool busy = false;
+  String? error;
+  Future<void> search() async { try { setState(() { busy = true; error = null; selected = null; }); final x = await widget.api.gateway('/v1/movies/search?q=${Uri.encodeQueryComponent(query.text)}'); if (!mounted) return; setState(() { movies = x; releases = []; }); } catch (e) { if (mounted) setState(() => error = '$e'); } finally { if (mounted) setState(() => busy = false); } }
+  Future<void> loadReleases(Map<String, dynamic> movie) async { try { setState(() { selected = movie; busy = true; error = null; releases = []; }); final x = await widget.api.gateway('/v1/movies/${movie['tmdbId']}/releases'); if (!mounted) return; setState(() => releases = x); } catch (e) { if (mounted) setState(() => error = '$e'); } finally { if (mounted) setState(() => busy = false); } }
+  Future<void> download(Map<String, dynamic> release) async { try { await widget.api.gateway('/v1/movies/${selected!['tmdbId']}/download', method: 'POST', body: {'guid': release['guid'], 'indexerId': release['indexerId']}); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã gửi bản tải sang Radarr/qBittorrent'))); } catch (e) { if (mounted) showError(context, e); } }
+  @override void dispose() { query.dispose(); super.dispose(); }
+  @override Widget build(BuildContext context) => PageFrame(title: selected == null ? 'Tìm phim' : 'Chi tiết phim', child: selected == null ? Column(children: [
+    Row(children: [Expanded(child: TextField(controller: query, onSubmitted: (_) => search(), decoration: const InputDecoration(labelText: 'Tên phim', prefixIcon: Icon(Icons.search)))), const SizedBox(width: 12), FilledButton(onPressed: busy ? null : search, child: const Text('Tìm'))]),
+    const SizedBox(height: 12), if (busy) const LinearProgressIndicator(), if (error != null) Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+    Expanded(child: movies.isEmpty && !busy ? const Center(child: Text('Nhập tên phim để tìm kiếm')) : ListView(children: movies.map((m) => Card(child: ListTile(leading: m['poster'] != null ? Image.network(m['poster'], width: 44, errorBuilder: (_, __, ___) => const Icon(Icons.movie)) : const Icon(Icons.movie), title: Text('${m['title']} (${m['year'] ?? ''})'), subtitle: Text(m['overview'] ?? '', maxLines: 2, overflow: TextOverflow.ellipsis), trailing: const Icon(Icons.chevron_right), onTap: () => loadReleases(Map<String, dynamic>.from(m))))).toList())),
+  ]) : Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+    TextButton.icon(onPressed: busy ? null : () => setState(() { selected = null; releases = []; error = null; }), icon: const Icon(Icons.arrow_back), label: const Text('Quay lại kết quả')),
+    Text('${selected!['title']} (${selected!['year'] ?? ''})', style: Theme.of(context).textTheme.headlineSmall),
+    const SizedBox(height: 8), Text(selected!['overview'] ?? 'Không có mô tả', maxLines: 4, overflow: TextOverflow.ellipsis),
+    const SizedBox(height: 12), if (busy) const LinearProgressIndicator(),
+    if (error != null) Row(children: [Expanded(child: Text(error!, style: TextStyle(color: Theme.of(context).colorScheme.error))), OutlinedButton.icon(onPressed: () => loadReleases(selected!), icon: const Icon(Icons.refresh), label: const Text('Thử lại'))]),
+    if (!busy && error == null && releases.isEmpty) Expanded(child: Center(child: Column(mainAxisSize: MainAxisSize.min, children: [const Icon(Icons.search_off, size: 48), const SizedBox(height: 12), const Text('Không tìm thấy bản tải phù hợp'), const SizedBox(height: 8), const Text('Hãy kiểm tra indexer trong Prowlarr hoặc thử lại sau.'), const SizedBox(height: 12), OutlinedButton.icon(onPressed: () => loadReleases(selected!), icon: const Icon(Icons.refresh), label: const Text('Tìm lại release'))]))),
+    if (releases.isNotEmpty) Expanded(child: ListView(children: releases.map((r) => Card(child: ListTile(title: Text(r['title']), subtitle: Text('${r['quality']} • ${r['codec']} • ${formatBytes(r['size'])} • seed ${r['seeders']}'), trailing: FilledButton(onPressed: r['rejected'] == true ? null : () => download(r), child: const Text('Tải'))))).toList())),
+  ]));
+}
+
+class DownloadsPage extends StatefulWidget {
+  const DownloadsPage({super.key, required this.api}); final Api api;
+  @override State<DownloadsPage> createState() => _DownloadsPageState();
+}
+class _DownloadsPageState extends State<DownloadsPage> {
+  List<dynamic> items = [];
+  @override void initState() { super.initState(); load(); }
+  Future<void> load() async { try { final x = await widget.api.gateway('/v1/downloads'); if (mounted) setState(() => items = x); } catch (e) { if (mounted) showError(context, e); } }
+  Future<void> act(String hash, String action) async { try { await widget.api.gateway('/v1/downloads/$hash${action == 'delete' ? '' : '/$action'}', method: action == 'delete' ? 'DELETE' : 'POST'); await load(); } catch (e) { if (mounted) showError(context, e); } }
+  @override Widget build(BuildContext context) => PageFrame(title: 'Downloads', actions: [IconButton(onPressed: load, icon: const Icon(Icons.refresh))], child: items.isEmpty ? const Center(child: Text('Chưa có download')) : ListView(children: items.map((x) => Card(child: ListTile(title: Text(x['name']), subtitle: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [LinearProgressIndicator(value: (x['progress'] ?? 0) / 100), Text('${x['progress']}% • ${x['state']} • ${formatBytes(x['downloadSpeed'])}/s')]), trailing: Wrap(children: [IconButton(onPressed: () => act(x['hash'], 'pause'), icon: const Icon(Icons.pause)), IconButton(onPressed: () => act(x['hash'], 'resume'), icon: const Icon(Icons.play_arrow)), IconButton(onPressed: () => act(x['hash'], 'delete'), icon: const Icon(Icons.delete_outline))])))).toList()));
+}
+
+class SubtitlesPage extends StatefulWidget {
+  const SubtitlesPage({super.key, required this.api}); final Api api;
+  @override State<SubtitlesPage> createState() => _SubtitlesPageState();
+}
+class _SubtitlesPageState extends State<SubtitlesPage> {
+  String language = 'vi';
+  String provider = 'all';
+  bool directFallback = false;
+  bool directAvailable = false;
+  bool busy = false;
+  int? mediaId;
+  List<dynamic> media = [];
+  List<dynamic> results = [];
+  @override void initState() { super.initState(); loadMedia(); }
+  Future<void> loadMedia() async {
+    try {
+      final value = await widget.api.gateway('/v1/library/subtitle-media');
+      if (!mounted) return;
+      setState(() { media = value; if (media.isNotEmpty) mediaId ??= media.first['mediaId']; });
+    } catch (e) { if (mounted) showError(context, e); }
+  }
+  Future<void> search({bool direct = false}) async {
+    if (mediaId == null) { showError(context, 'Chưa có phim trong thư viện'); return; }
+    setState(() => busy = true);
+    try {
+      final path = direct
+          ? '/v1/library/$mediaId/subtitles/yify/search?language=$language'
+          : '/v1/library/$mediaId/subtitles/search?language=$language&provider=$provider&directFallback=$directFallback';
+      final value = await widget.api.gateway(path);
+      if (!mounted) return;
+      setState(() { results = value is List ? value : (value['data'] ?? []); directAvailable = value is Map && value['directEnabled'] == true; });
+    } catch (e) { if (mounted) showError(context, e); }
+    finally { if (mounted) setState(() => busy = false); }
+  }
+  Future<void> choose(dynamic subtitle) async {
+    try {
+      await widget.api.gateway('/v1/library/$mediaId/subtitles/download', method: 'POST', body: {'downloadToken': subtitle['downloadToken']});
+      if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã tải phụ đề')));
+    } catch (e) { if (mounted) showError(context, e); }
+  }
+  Future<void> refresh() async { if (mediaId == null) return; try { await widget.api.gateway('/v1/library/$mediaId/subtitles/refresh', method: 'POST'); if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Đã quét lại phụ đề'))); } catch (e) { if (mounted) showError(context, e); } }
+  @override Widget build(BuildContext context) => PageFrame(title: 'Phụ đề', child: Column(children: [
+    Wrap(spacing: 12, runSpacing: 10, crossAxisAlignment: WrapCrossAlignment.center, children: [
+      SizedBox(width: 300, child: DropdownButtonFormField<int>(initialValue: mediaId, decoration: const InputDecoration(labelText: 'Phim trong thư viện'), items: media.map<DropdownMenuItem<int>>((m) => DropdownMenuItem(value: m['mediaId'], child: Text('${m['title']} (${m['year']})', overflow: TextOverflow.ellipsis))).toList(), onChanged: (v) => setState(() { mediaId = v; results = []; }))),
+      DropdownButton(value: language, items: const [DropdownMenuItem(value: 'vi', child: Text('Tiếng Việt')), DropdownMenuItem(value: 'en', child: Text('English'))], onChanged: (v) => setState(() => language = v!)),
+      DropdownButton(value: provider, items: const [DropdownMenuItem(value: 'all', child: Text('Tất cả provider')), DropdownMenuItem(value: 'bazarr', child: Text('Bazarr')), DropdownMenuItem(value: 'yifysubtitles', child: Text('YIFY qua Bazarr')), DropdownMenuItem(value: 'gestdown', child: Text('Gestdown')), DropdownMenuItem(value: 'yify-direct', child: Text('YIFY Direct'))], onChanged: (v) => setState(() => provider = v!)),
+      Row(mainAxisSize: MainAxisSize.min, children: [Switch(value: directFallback, onChanged: (v) => setState(() => directFallback = v)), const Text('Cho phép YIFY Direct fallback')]),
+      FilledButton(onPressed: busy ? null : () => search(), child: const Text('Tìm qua Bazarr')),
+      OutlinedButton(onPressed: busy ? null : () => search(direct: true), child: const Text('Tìm trực tiếp YIFY')),
+      IconButton(onPressed: refresh, tooltip: 'Quét lại', icon: const Icon(Icons.refresh)),
+    ]),
+    if (!directAvailable && directFallback) const Align(alignment: Alignment.centerLeft, child: Text('YIFY Direct đang tắt trong cấu hình backend.', style: TextStyle(color: Colors.amber))),
+    const SizedBox(height: 12), if (busy) const LinearProgressIndicator(),
+    Expanded(child: results.isEmpty ? const Center(child: Text('Chọn phim, ngôn ngữ và nguồn để tìm')) : ListView(children: results.map((s) => Card(child: ListTile(title: Text(s['release'] ?? 'Subtitle'), subtitle: Text('${s['provider'] ?? ''} • ${s['language'] ?? ''} • ${s['format'] ?? ''} • score ${s['score'] ?? ''}${s['hearingImpaired'] == true ? ' • HI' : ''}'), trailing: FilledButton(onPressed: s['downloadToken'] == null ? null : () => choose(s), child: const Text('Tải'))))).toList())),
+  ]));
+}
+
+class LibraryPage extends StatefulWidget {
+  const LibraryPage({super.key, required this.api}); final Api api;
+  @override State<LibraryPage> createState() => _LibraryPageState();
+}
+class _LibraryPageState extends State<LibraryPage> {
+  List<dynamic> items = [];
+  @override void initState() { super.initState(); load(); }
+  Future<void> load() async { try { final x = await widget.api.gateway('/v1/library'); if (mounted) setState(() => items = x is List ? x : (x['Items'] ?? [])); } catch (e) { if (mounted) showError(context, e); } }
+  Future<void> openJellyfin() => Process.start('cmd', ['/c', 'start', '', 'http://localhost:8096'], runInShell: true);
+  @override Widget build(BuildContext context) => PageFrame(title: 'Thư viện', actions: [FilledButton.icon(onPressed: openJellyfin, icon: const Icon(Icons.open_in_new), label: const Text('Mở Jellyfin')), IconButton(onPressed: load, icon: const Icon(Icons.refresh))], child: items.isEmpty ? const Center(child: Text('Thư viện đang trống')) : GridView.extent(maxCrossAxisExtent: 260, childAspectRatio: 1.5, children: items.map((x) => Card(child: Padding(padding: const EdgeInsets.all(12), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [Text(x['Name'] ?? '', style: Theme.of(context).textTheme.titleMedium), const Spacer(), Text((x['UserData']?['PlaybackPositionTicks'] ?? 0) > 0 ? 'Đang xem' : 'Chưa xem')])))).toList()));
+}
+
+class ServicesPage extends StatefulWidget {
+  const ServicesPage({super.key, required this.api}); final Api api;
+  @override State<ServicesPage> createState() => _ServicesPageState();
+}
+class _ServicesPageState extends State<ServicesPage> {
+  List<dynamic> items = [];
+  @override void initState() { super.initState(); load(); }
+  Future<void> load() async { try { final x = await widget.api.host('/host/services'); if (mounted) setState(() => items = x); } catch (e) { if (mounted) showError(context, e); } }
+  Future<void> act(String id, String action) async { try { await widget.api.host('/host/services/$id/$action', method: 'POST'); await load(); } catch (e) { if (mounted) showError(context, e); } }
+  Future<void> logs(String id) async { try { final x = await widget.api.host('/host/services/$id/logs'); if (mounted) showDialog(context: context, builder: (_) => AlertDialog(title: Text('Log: $id'), content: SizedBox(width: 760, child: SingleChildScrollView(child: SelectableText(x['logs'] ?? ''))), actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Đóng'))])); } catch (e) { if (mounted) showError(context, e); } }
+  @override Widget build(BuildContext context) => PageFrame(title: 'Services', actions: [IconButton(onPressed: load, icon: const Icon(Icons.refresh))], child: ListView(children: items.map((x) => Card(child: ListTile(leading: Icon(Icons.circle, color: x['state'] == 'running' ? Colors.green : Colors.grey, size: 14), title: Text(x['id']), subtitle: Text('${x['state']} • ${x['health'] ?? ''}'), trailing: Wrap(children: [IconButton(onPressed: () => logs(x['id']), tooltip: 'Xem log', icon: const Icon(Icons.article_outlined)), IconButton(onPressed: () => act(x['id'], 'start'), icon: const Icon(Icons.play_arrow)), IconButton(onPressed: () => act(x['id'], 'restart'), icon: const Icon(Icons.restart_alt)), IconButton(onPressed: () => act(x['id'], 'stop'), icon: const Icon(Icons.stop))])))).toList()));
+}
+
+class SettingsPage extends StatelessWidget {
+  const SettingsPage({super.key, required this.config}); final LocalConfig config;
+  @override Widget build(BuildContext context) => PageFrame(title: 'Cài đặt', child: ListView(children: [ListTile(title: const Text('Gateway'), subtitle: Text(config.gateway)), ListTile(title: const Text('Host controller'), subtitle: Text(config.controller)), const ListTile(title: Text('Media root'), subtitle: Text('D:\\Media')), const ListTile(title: Text('Tài khoản local'), subtitle: Text('admin / •••••••••'))]));
+}
+
+String formatBytes(dynamic value) {
+  final n = (value ?? 0) as num;
+  if (n >= 1073741824) return '${(n / 1073741824).toStringAsFixed(1)} GB';
+  if (n >= 1048576) return '${(n / 1048576).toStringAsFixed(1)} MB';
+  if (n >= 1024) return '${(n / 1024).toStringAsFixed(1)} KB';
+  return '${n.toInt()} B';
+}

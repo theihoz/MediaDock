@@ -1,0 +1,154 @@
+name: media-stack
+
+x-common: &common
+  restart: unless-stopped
+  networks: [media]
+
+x-arr-environment: &arr-environment
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+  TZ: ${TZ:-Asia/Ho_Chi_Minh}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: media
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media -d media"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [media]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [media]
+
+  qbittorrent:
+    <<: *common
+    image: lscr.io/linuxserver/qbittorrent:latest
+    environment:
+      <<: *arr-environment
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
+    volumes:
+      - "${MEDIA_ROOT}/config/qbittorrent:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["8080:8080", "6881:6881", "6881:6881/udp"]
+
+  prowlarr:
+    <<: *common
+    image: lscr.io/linuxserver/prowlarr:latest
+    environment: *arr-environment
+    volumes: ["${MEDIA_ROOT}/config/prowlarr:/config"]
+    ports: ["9696:9696"]
+
+  radarr:
+    <<: *common
+    image: lscr.io/linuxserver/radarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/radarr:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["7878:7878"]
+
+  sonarr:
+    <<: *common
+    image: lscr.io/linuxserver/sonarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/sonarr:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["8989:8989"]
+
+  bazarr:
+    <<: *common
+    image: lscr.io/linuxserver/bazarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/bazarr:/config"
+      - "${MEDIA_ROOT}/library:/data/library"
+    ports: ["6767:6767"]
+
+  jellyfin:
+    <<: *common
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - "${MEDIA_ROOT}/config/jellyfin:/config"
+      - "${MEDIA_ROOT}/library:/data/library:ro"
+      - "${MEDIA_ROOT}/cache/jellyfin:/cache"
+    ports: ["8096:8096"]
+
+  seerr:
+    <<: *common
+    image: fallenbagel/jellyseerr:latest
+    volumes: ["${MEDIA_ROOT}/config/seerr:/app/config"]
+    ports: ["5055:5055"]
+
+  flaresolverr:
+    <<: *common
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    environment:
+      LOG_LEVEL: info
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+
+  autobrr:
+    <<: *common
+    image: ghcr.io/autobrr/autobrr:latest
+    environment: *arr-environment
+    volumes: ["${MEDIA_ROOT}/config/autobrr:/config"]
+    ports: ["7474:7474"]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      PORT: 3000
+      QBITTORRENT_URL: http://qbittorrent:8080
+      PROWLARR_URL: http://prowlarr:9696
+      RADARR_URL: http://radarr:7878
+      SONARR_URL: http://sonarr:8989
+      BAZARR_URL: http://bazarr:6767
+      JELLYFIN_URL: http://jellyfin:8096
+      SEERR_URL: http://seerr:5055
+      LOCAL_ADMIN_USER: ${LOCAL_ADMIN_USER:-admin}
+      LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-media1234}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      YIFY_DIRECT_ENABLED: ${YIFY_DIRECT_ENABLED:-false}
+      YIFY_DIRECT_BASE_URL: ${YIFY_DIRECT_BASE_URL:-}
+      SUBTITLE_TOKEN_SECRET: ${SUBTITLE_TOKEN_SECRET}
+      RADARR_CONFIG: /service-config/radarr.xml
+      SONARR_CONFIG: /service-config/sonarr.xml
+      BAZARR_CONFIG: /service-config/bazarr.yaml
+    volumes:
+      - "${MEDIA_ROOT}/config/radarr/config.xml:/service-config/radarr.xml:ro"
+      - "${MEDIA_ROOT}/config/sonarr/config.xml:/service-config/sonarr.xml:ro"
+      - "${MEDIA_ROOT}/config/bazarr/config/config.yaml:/service-config/bazarr.yaml:ro"
+      - "${MEDIA_ROOT}/library:/data/library"
+    ports: ["3000:3000"]
+    networks: [media]
+
+networks:
+  media: { name: media }
+
+volumes:
+  postgres_data: { name: media-stack-postgres-data, external: true }
+  redis_data: { name: media-stack-redis-data, external: true }
