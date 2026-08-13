@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_control/controller_bootstrap.dart';
 
@@ -700,6 +701,9 @@ class _DownloadsPageState extends State<DownloadsPage> {
     }
   }
 
+  String stateLabel(dynamic state) =>
+      state == 'importing' ? 'Đang nhập thư viện' : '$state';
+
   @override
   Widget build(BuildContext context) => PageFrame(
       title: 'Downloads',
@@ -726,7 +730,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                                       LinearProgressIndicator(
                                           value: (x['progress'] ?? 0) / 100),
                                       Text(
-                                          '${x['progress']}% • ${x['state']} • ${formatBytes(x['downloadSpeed'])}/s')
+                                          '${x['progress']}% • ${stateLabel(x['state'])} • ${formatBytes(x['downloadSpeed'])}/s')
                                     ]),
                                 trailing: Wrap(children: [
                                   IconButton(
@@ -927,24 +931,191 @@ class LibraryPage extends StatefulWidget {
 
 class _LibraryPageState extends State<LibraryPage> {
   List<dynamic> items = [];
+  dynamic selected;
+  List<dynamic> subtitles = [];
+  bool refreshing = false;
+  Timer? deleteTimer;
+  double deleteProgress = 0;
+
   @override
   void initState() {
     super.initState();
     load();
   }
 
+  @override
+  void dispose() {
+    deleteTimer?.cancel();
+    super.dispose();
+  }
+
   Future<void> load() async {
     try {
       final x = await widget.api.gateway('/v1/library');
-      if (mounted) setState(() => items = x is List ? x : (x['Items'] ?? []));
+      if (mounted) setState(() => items = x is List ? x : []);
     } catch (e) {
       if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> selectMovie(dynamic movie) async {
+    setState(() => selected = movie);
+    await loadSubtitles();
+  }
+
+  Future<void> loadSubtitles() async {
+    if (selected == null) return;
+    try {
+      final value = await widget.api
+          .gateway('/v1/library/${selected['mediaId']}/subtitles');
+      if (mounted) setState(() => subtitles = value is List ? value : []);
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> refreshLibrary() async {
+    setState(() => refreshing = true);
+    try {
+      await widget.api.gateway('/v1/library/refresh', method: 'POST');
+      for (var attempt = 0; attempt < 15 && mounted; attempt++) {
+        await Future<void>.delayed(const Duration(seconds: 2));
+        await load();
+      }
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => refreshing = false);
+    }
+  }
+
+  Future<String?> pickSubtitleFile() async {
+    if (!Platform.isWindows) return null;
+    const script =
+        r"Add-Type -AssemblyName System.Windows.Forms; $d=New-Object System.Windows.Forms.OpenFileDialog; $d.Filter='Subtitle files (*.srt;*.ass;*.ssa;*.vtt)|*.srt;*.ass;*.ssa;*.vtt'; if($d.ShowDialog() -eq 'OK'){$d.FileName}";
+    final result =
+        await Process.run('powershell.exe', ['-NoProfile', '-Command', script]);
+    final value = '${result.stdout}'.trim();
+    return value.isEmpty ? null : value;
+  }
+
+  Future<void> uploadSubtitle() async {
+    final filePath = await pickSubtitleFile();
+    if (filePath == null || !mounted) return;
+    var language = 'vi';
+    var forced = false;
+    var hearingImpaired = false;
+    final accepted = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => StatefulBuilder(
+            builder: (context, update) => AlertDialog(
+                  title: const Text('Gắn phụ đề local'),
+                  content: Column(mainAxisSize: MainAxisSize.min, children: [
+                    DropdownButton<String>(
+                        value: language,
+                        items: const [
+                          DropdownMenuItem(
+                              value: 'vi', child: Text('Tiếng Việt')),
+                          DropdownMenuItem(value: 'en', child: Text('English'))
+                        ],
+                        onChanged: (value) => update(() => language = value!)),
+                    CheckboxListTile(
+                        value: forced,
+                        onChanged: (value) => update(() => forced = value!),
+                        title: const Text('Forced')),
+                    CheckboxListTile(
+                        value: hearingImpaired,
+                        onChanged: (value) =>
+                            update(() => hearingImpaired = value!),
+                        title: const Text('Hearing impaired')),
+                  ]),
+                  actions: [
+                    TextButton(
+                        onPressed: () => Navigator.pop(dialogContext, false),
+                        child: const Text('Hủy')),
+                    FilledButton(
+                        onPressed: () => Navigator.pop(dialogContext, true),
+                        child: const Text('Gắn'))
+                  ],
+                )));
+    if (accepted != true) return;
+    try {
+      final file = File(filePath);
+      await widget.api.gateway(
+          '/v1/library/${selected['mediaId']}/subtitles/upload',
+          method: 'POST',
+          body: {
+            'fileName': file.uri.pathSegments.last,
+            'contentBase64': base64Encode(await file.readAsBytes()),
+            'language': language,
+            'forced': forced,
+            'hearingImpaired': hearingImpaired,
+          });
+      await loadSubtitles();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  Future<void> deleteSubtitle(dynamic subtitle) async {
+    try {
+      await widget.api.gateway(
+          '/v1/library/${selected['mediaId']}/subtitles/${subtitle['id']}',
+          method: 'DELETE');
+      await loadSubtitles();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  void startDeleteHold() {
+    deleteTimer?.cancel();
+    setState(() => deleteProgress = 0);
+    var ticks = 0;
+    deleteTimer = Timer.periodic(const Duration(milliseconds: 100), (timer) {
+      ticks++;
+      if (mounted) setState(() => deleteProgress = ticks / 30);
+      if (ticks >= 30) {
+        timer.cancel();
+        unawaited(deleteMovie());
+      }
+    });
+  }
+
+  void cancelDeleteHold() {
+    deleteTimer?.cancel();
+    if (mounted && deleteProgress < 1) setState(() => deleteProgress = 0);
+  }
+
+  Future<void> deleteMovie() async {
+    try {
+      final result = await widget.api.gateway(
+          '/v1/library/${selected['mediaId']}',
+          method: 'DELETE',
+          body: {'deleteFiles': true, 'deleteTorrent': true});
+      if (!mounted) return;
+      setState(() {
+        selected = null;
+        subtitles = [];
+        deleteProgress = 0;
+      });
+      await load();
+      if (result is Map && result['status'] == 'partial_failure' && mounted) {
+        showError(
+            context, 'Đã xóa phim nhưng chưa dọn được torrent. Hãy thử lại.');
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() => deleteProgress = 0);
+        showError(context, e);
+      }
     }
   }
 
   Future<void> openJellyfin() =>
       Process.start('cmd', ['/c', 'start', '', 'http://localhost:8096'],
           runInShell: true);
+
   @override
   Widget build(BuildContext context) => PageFrame(
       title: 'Thư viện',
@@ -953,32 +1124,108 @@ class _LibraryPageState extends State<LibraryPage> {
             onPressed: openJellyfin,
             icon: const Icon(Icons.open_in_new),
             label: const Text('Mở Jellyfin')),
+        FilledButton.icon(
+            onPressed: refreshing ? null : refreshLibrary,
+            icon: refreshing
+                ? const SizedBox.square(
+                    dimension: 16,
+                    child: CircularProgressIndicator(strokeWidth: 2))
+                : const Icon(Icons.sync),
+            label: const Text('Quét Jellyfin')),
         IconButton(onPressed: load, icon: const Icon(Icons.refresh))
       ],
-      child: items.isEmpty
-          ? const Center(child: Text('Thư viện đang trống'))
-          : GridView.extent(
-              maxCrossAxisExtent: 260,
-              childAspectRatio: 1.5,
-              children: items
-                  .map((x) => Card(
-                      child: Padding(
-                          padding: const EdgeInsets.all(12),
-                          child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text(x['Name'] ?? '',
-                                    style: Theme.of(context)
-                                        .textTheme
-                                        .titleMedium),
-                                const Spacer(),
-                                Text((x['UserData']?['PlaybackPositionTicks'] ??
-                                            0) >
-                                        0
-                                    ? 'Đang xem'
-                                    : 'Chưa xem')
-                              ]))))
-                  .toList()));
+      child: selected != null
+          ? movieDetail()
+          : items.isEmpty
+              ? const Center(child: Text('Thư viện đang trống'))
+              : GridView.extent(
+                  maxCrossAxisExtent: 260,
+                  childAspectRatio: 1.5,
+                  children: items
+                      .map((x) => Card(
+                          child: InkWell(
+                              onTap: () => selectMovie(x),
+                              child: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Text(
+                                            '${x['title'] ?? ''}${(x['year'] ?? 0) > 0 ? ' (${x['year']})' : ''}',
+                                            style: Theme.of(context)
+                                                .textTheme
+                                                .titleMedium),
+                                        const Spacer(),
+                                        Text(x['watched'] == true
+                                            ? 'Đã xem'
+                                            : (x['playbackPositionTicks'] ??
+                                                        0) >
+                                                    0
+                                                ? 'Đang xem'
+                                                : 'Chưa xem'),
+                                        Text(
+                                            '${x['videoCodec'] ?? ''} • ${x['audioCodec'] ?? ''} • ${x['subtitleCount'] ?? 0} phụ đề')
+                                      ])))))
+                      .toList()));
+
+  Widget movieDetail() =>
+      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        TextButton.icon(
+            onPressed: () => setState(() => selected = null),
+            icon: const Icon(Icons.arrow_back),
+            label: const Text('Quay lại thư viện')),
+        Text('${selected['title']} (${selected['year']})',
+            style: Theme.of(context).textTheme.headlineSmall),
+        Text(
+            '${selected['videoCodec'] ?? ''} • ${selected['audioCodec'] ?? ''}'),
+        const SizedBox(height: 12),
+        Wrap(spacing: 10, runSpacing: 10, children: [
+          FilledButton.icon(
+              onPressed: openJellyfin,
+              icon: const Icon(Icons.play_arrow),
+              label: const Text('Mở trong Jellyfin')),
+          OutlinedButton.icon(
+              onPressed: uploadSubtitle,
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Gắn phụ đề')),
+          OutlinedButton.icon(
+              onPressed: loadSubtitles,
+              icon: const Icon(Icons.subtitles),
+              label: const Text('Quét phụ đề')),
+        ]),
+        const SizedBox(height: 12),
+        Text('Phụ đề', style: Theme.of(context).textTheme.titleMedium),
+        Expanded(
+            child: ListView(children: [
+          ...subtitles.map((subtitle) => ListTile(
+              title: Text(subtitle['name'] ?? 'Subtitle'),
+              subtitle: Text(subtitle['language'] ?? ''),
+              trailing: IconButton(
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: () => deleteSubtitle(subtitle)))),
+          const Divider(),
+          Listener(
+              onPointerDown: (_) => startDeleteHold(),
+              onPointerUp: (_) => cancelDeleteHold(),
+              onPointerCancel: (_) => cancelDeleteHold(),
+              child: SizedBox(
+                  width: 320,
+                  child: FilledButton.icon(
+                      style:
+                          FilledButton.styleFrom(backgroundColor: Colors.red),
+                      onPressed: () {},
+                      icon: const Icon(Icons.delete_forever),
+                      label: Text(deleteProgress > 0
+                          ? 'Giữ... ${(deleteProgress * 3).clamp(0, 3).toStringAsFixed(1)}s / 3s'
+                          : 'Giữ 3 giây để xóa toàn bộ')))),
+          if (deleteProgress > 0)
+            SizedBox(
+                width: 320,
+                child:
+                    LinearProgressIndicator(value: deleteProgress.clamp(0, 1))),
+        ]))
+      ]);
 }
 
 class ServicesPage extends StatefulWidget {
@@ -1079,12 +1326,21 @@ class SettingsPage extends StatefulWidget {
 
 class _SettingsPageState extends State<SettingsPage> {
   Map<String, dynamic>? maintenance;
+  Map<String, dynamic>? tv;
   bool cleaning = false;
   String? error;
   @override
   void initState() {
     super.initState();
     unawaited(loadMaintenance());
+    unawaited(loadTv());
+  }
+
+  Future<void> loadTv() async {
+    try {
+      final value = await widget.api.host('/host/tv/status');
+      if (mounted) setState(() => tv = Map<String, dynamic>.from(value));
+    } catch (_) {}
   }
 
   Future<void> loadMaintenance() async {
@@ -1154,6 +1410,30 @@ class _SettingsPageState extends State<SettingsPage> {
           const ListTile(
               title: Text('Tài khoản local'),
               subtitle: Text('admin / •••••••••')),
+          const Divider(),
+          ListTile(
+              leading: const Icon(Icons.tv),
+              title: const Text('Samsung TV trong mạng LAN'),
+              subtitle: Text(
+                  tv?['url'] ?? 'Không tìm thấy địa chỉ LAN riêng của máy'),
+              trailing: tv?['url'] == null
+                  ? null
+                  : IconButton(
+                      tooltip: 'Sao chép URL',
+                      onPressed: () =>
+                          Clipboard.setData(ClipboardData(text: tv!['url'])),
+                      icon: const Icon(Icons.copy))),
+          ListTile(
+              title: const Text('Trạng thái Jellyfin TV'),
+              subtitle: Text(tv?['reachable'] == true
+                  ? 'Sẵn sàng • TCP 8096 • discovery UDP 7359'
+                  : 'Chưa chạy. Nhấn Start server rồi thử lại.'),
+              trailing: IconButton(
+                  onPressed: loadTv, icon: const Icon(Icons.refresh))),
+          const Padding(
+              padding: EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+              child: Text(
+                  'Trên TV Samsung: cài Jellyfin Tizen bằng Developer Mode/Tizen Studio, sau đó thêm máy chủ bằng URL ở trên. Không bật chuyển tiếp cổng Internet.')),
           const Divider(),
           ListTile(
               title: const Text('Dọn dẹp tự động'),

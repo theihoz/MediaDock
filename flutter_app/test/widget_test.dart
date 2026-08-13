@@ -133,6 +133,38 @@ class MaintenanceApi extends Api {
   }
 }
 
+class LibraryApi extends Api {
+  LibraryApi() : super(const LocalConfig());
+  int deleteCalls = 0;
+
+  @override
+  Future<dynamic> gateway(String path,
+      {String method = 'GET', Object? body}) async {
+    if (path == '/v1/library' && method == 'GET') {
+      return [
+        {
+          'mediaId': 11,
+          'jellyfinId': 'jf-11',
+          'title': 'The Batman',
+          'year': 2022,
+          'watched': false,
+          'playbackPositionTicks': 0,
+          'videoCodec': 'H264',
+          'audioCodec': 'AAC',
+          'subtitleCount': 1
+        }
+      ];
+    }
+    if (path == '/v1/library/11/subtitles') return [];
+    if (path == '/v1/library/11' && method == 'DELETE') {
+      expect(body, {'deleteFiles': true, 'deleteTorrent': true});
+      deleteCalls++;
+      return {'status': 'deleted'};
+    }
+    throw StateError('Unexpected request: $method $path');
+  }
+}
+
 void main() {
   testWidgets('shows readable Vietnamese media navigation', (tester) async {
     await tester.pumpWidget(MediaControlApp(
@@ -253,6 +285,9 @@ void main() {
         .pumpWidget(MaterialApp(home: Scaffold(body: SettingsPage(api: api))));
     await tester.pumpAndSettle();
 
+    await tester.scrollUntilVisible(
+        find.text('Xóa cache & log'), 250,
+        scrollable: find.byType(Scrollable).last);
     await tester.tap(find.text('Xóa cache & log'));
     await tester.pumpAndSettle();
     expect(
@@ -265,5 +300,28 @@ void main() {
     expect(api.cleanupCalls, 1);
     expect(find.textContaining('2.0 KB'), findsOneWidget);
     expect(find.textContaining('3 file'), findsOneWidget);
+  });
+
+  testWidgets('library deletion requires an uninterrupted three second hold',
+      (tester) async {
+    final api = LibraryApi();
+    await tester.pumpWidget(
+        MaterialApp(home: Scaffold(body: LibraryPage(api: api))));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('The Batman (2022)'));
+    await tester.pumpAndSettle();
+
+    final button = find.text('Giữ 3 giây để xóa toàn bộ');
+    final shortHold = await tester.startGesture(tester.getCenter(button));
+    await tester.pump(const Duration(seconds: 2));
+    await shortHold.up();
+    await tester.pump();
+    expect(api.deleteCalls, 0);
+
+    final fullHold = await tester.startGesture(tester.getCenter(button));
+    await tester.pump(const Duration(seconds: 3));
+    await fullHold.up();
+    await tester.pumpAndSettle();
+    expect(api.deleteCalls, 1);
   });
 }

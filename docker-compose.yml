@@ -101,7 +101,7 @@ services:
       - "${MEDIA_ROOT}/config/jellyfin:/config"
       - "${MEDIA_ROOT}/library:/data/library:ro"
       - "${MEDIA_ROOT}/cache/jellyfin:/cache"
-    ports: ["8096:8096"]
+    ports: ["8096:8096", "7359:7359/udp"]
 
   seerr:
     <<: *common

@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   buildSubtitleDeleteQuery,
@@ -7,6 +10,7 @@ import {
   filterSubtitleResults,
   extractApiKey,
   loginSucceeded,
+  MediaClients,
   normalizeRelease,
   normalizeTorrent,
   normalizeSubtitleMedia,
@@ -115,4 +119,98 @@ test('normalizes Bazarr movies for the Flutter selector', () => {
   assert.deepEqual(normalizeSubtitleMedia({ radarrId: 7, title: 'Movie', year: '2020', path: '/data/library/movies/Movie/file.mp4', imdbId: 'tt7', poster: '/poster.jpg' }), {
     mediaId: 7, title: 'Movie', year: 2020, path: '/data/library/movies/Movie/file.mp4', imdbId: 'tt7', poster: '/poster.jpg', type: 'movie',
   });
+});
+
+test('hides only completed torrents confirmed as imported', async () => {
+  const media = new MediaClients({
+    importStatusCache: { get: async hash => hash === 'done' ? 'imported' : 'awaiting_import' },
+  });
+  media.qbit = async () => [
+    { hash: 'active', name: 'Active', progress: .5, state: 'downloading', category: 'movies' },
+    { hash: 'waiting', name: 'Waiting', progress: 1, state: 'stalledUP', category: 'movies' },
+    { hash: 'done', name: 'Done', progress: 1, state: 'forcedUP', category: 'movies' },
+  ];
+
+  assert.deepEqual((await media.downloads()).map(item => [item.hash, item.importStatus, item.state]), [
+    ['active', 'downloading', 'downloading'],
+    ['waiting', 'awaiting_import', 'importing'],
+  ]);
+});
+
+test('matches Arr import history by download hash without relying on its broken filter', async () => {
+  const media = new MediaClients({});
+  let requestPath;
+  media.arr = async (_service, path) => {
+    requestPath = path;
+    return { records: [{ eventType: 'downloadFolderImported', downloadId: 'ABC123' }] };
+  };
+  assert.equal(await media.isImported('abc123', 'movies'), true);
+  assert.match(requestPath, /pageSize=100/);
+  assert.doesNotMatch(requestPath, /downloadId=/);
+});
+
+test('normalizes the managed Radarr library and matches Jellyfin by path', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'media-library-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const movieDir = path.join(root, 'The Batman (2022)');
+  const video = path.join(movieDir, 'The Batman.mp4');
+  await fs.mkdir(movieDir, { recursive: true });
+  await fs.writeFile(video, 'video');
+  await fs.writeFile(path.join(movieDir, 'The Batman.vi.srt'), 'subtitle');
+  const media = new MediaClients({ libraryRoot: root, jellyfinApiKey: 'token' });
+  media.arr = async (_service, requestPath) => requestPath === '/movie' ? [{ id: 11, title: 'The Batman', year: 2022, path: movieDir, movieFile: { path: video, mediaInfo: { videoCodec: 'h264', audioCodec: 'aac' } } }] : [];
+  media.jellyfin = async () => ({ Items: [{ Id: 'jf-1', Path: video, UserData: { Played: true } }] });
+
+  const result = await media.library();
+  assert.equal(result.length, 1);
+  assert.equal(result[0].jellyfinId, 'jf-1');
+  assert.equal(result[0].subtitleCount, 1);
+});
+
+test('uploads and deletes only generated subtitle sidecars', async t => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), 'media-subtitle-'));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const movieDir = path.join(root, 'Movie');
+  const video = path.join(movieDir, 'Movie.mp4');
+  await fs.mkdir(movieDir, { recursive: true });
+  await fs.writeFile(video, 'video');
+  const media = new MediaClients({ libraryRoot: root });
+  media.arr = async () => ({ id: 7, path: movieDir, movieFile: { path: video } });
+  media.refreshSubtitles = async () => null;
+  media.refreshJellyfin = async () => null;
+
+  const uploaded = await media.uploadLocalSubtitle(7, { fileName: 'source.srt', contentBase64: Buffer.from('subtitle').toString('base64'), language: 'vi', forced: false, hearingImpaired: true });
+  assert.equal(uploaded.name, 'Movie.vi.hi.srt');
+  assert.equal(await fs.readFile(path.join(movieDir, uploaded.name), 'utf8'), 'subtitle');
+  await media.deleteLocalSubtitle(7, uploaded.id);
+  await assert.rejects(fs.stat(path.join(movieDir, uploaded.name)), /ENOENT/);
+});
+
+test('deletes Arr media before deleting its related torrent data', async () => {
+  const calls = [];
+  const media = new MediaClients({ libraryRoot: '/data/library/movies' });
+  media.arr = async (_service, requestPath, options = {}) => {
+    calls.push(`${options.method ?? 'GET'} ${requestPath}`);
+    if (requestPath === '/movie/7') return { id: 7, path: '/data/library/movies/Movie', movieFile: { path: '/data/library/movies/Movie/Movie.mp4' } };
+    if (requestPath.startsWith('/history?movieId=')) return { records: [{ eventType: 'grabbed', data: { torrentInfoHash: 'ABC' } }] };
+    return null;
+  };
+  media.torrentAction = async (action, hash) => calls.push(`QBIT ${action} ${hash}`);
+  media.refreshJellyfin = async () => calls.push('JELLYFIN');
+
+  assert.deepEqual(await media.deleteManagedMovie(7), { status: 'deleted', torrentHashes: ['abc'] });
+  assert.deepEqual(calls, ['GET /movie/7', 'GET /history?movieId=7&pageSize=100', 'DELETE /movie/7?deleteFiles=true&addImportExclusion=false', 'QBIT delete abc', 'JELLYFIN']);
+});
+
+test('does not delete torrent data when deleting the Arr movie fails', async () => {
+  let qbitCalled = false;
+  const media = new MediaClients({ libraryRoot: '/data/library/movies' });
+  media.arr = async (_service, requestPath, options = {}) => {
+    if (requestPath === '/movie/7') return { id: 7, path: '/data/library/movies/Movie', movieFile: { path: '/data/library/movies/Movie/Movie.mp4' } };
+    if (requestPath.startsWith('/history?movieId=')) return { records: [] };
+    if (options.method === 'DELETE') throw new Error('Radarr failed');
+  };
+  media.torrentAction = async () => { qbitCalled = true; };
+  await assert.rejects(media.deleteManagedMovie(7), /Radarr failed/);
+  assert.equal(qbitCalled, false);
 });

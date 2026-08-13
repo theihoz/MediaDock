@@ -26,3 +26,18 @@ $configJson = @{
 [IO.File]::WriteAllText($TempPath, $configJson, (New-Object Text.UTF8Encoding($false)))
 Move-Item -LiteralPath $TempPath -Destination $ConfigPath -Force
 Write-Output "Media Control local configuration installed at $ConfigPath"
+
+# Jellyfin is exposed only to devices on the current private LAN. These rules
+# do not create external forwarding and do not start Docker or the media stack.
+if (([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  foreach ($rule in @(
+    @{Name='Media Control Jellyfin HTTP';Protocol='TCP';Port=8096},
+    @{Name='Media Control Jellyfin Discovery';Protocol='UDP';Port=7359}
+  )) {
+    Get-NetFirewallRule -DisplayName $rule.Name -ErrorAction SilentlyContinue | Remove-NetFirewallRule
+    New-NetFirewallRule -DisplayName $rule.Name -Direction Inbound -Action Allow -Protocol $rule.Protocol -LocalPort $rule.Port -Profile Private -RemoteAddress LocalSubnet | Out-Null
+  }
+  Write-Output 'Jellyfin Private/LocalSubnet firewall rules installed.'
+} else {
+  Write-Warning 'Run this installer once as Administrator to add the Jellyfin LAN firewall rules.'
+}

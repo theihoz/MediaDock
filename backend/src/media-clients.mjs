@@ -1,4 +1,7 @@
 import fs from 'node:fs';
+import fsp from 'node:fs/promises';
+import path from 'node:path';
+import { decodeSubtitleUpload, ImportStatusCache, normalizeLibraryMovie, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
 
 export function extractApiKey(text) {
   const match = text.match(/<ApiKey>([^<]+)<\/ApiKey>/i) ?? text.match(/^\s*apikey:\s*['"]?([^'"\s]+)['"]?\s*$/im);
@@ -143,6 +146,7 @@ export class MediaClients {
     this.config = config;
     this.qbitCookie = null;
     this.releaseCache = config.releaseCache ?? new ReleaseSearchCache();
+    this.importStatusCache = config.importStatusCache ?? new ImportStatusCache({ lookup: (hash, category) => this.isImported(hash, category) });
   }
 
   arrKey(name) { return apiKeyFrom(this.config[`${name}Config`]); }
@@ -205,7 +209,27 @@ export class MediaClients {
     return text ? JSON.parse(text) : null;
   }
 
-  async downloads() { return (await this.qbit('/torrents/info')).map(normalizeTorrent); }
+  async isImported(hash, category) {
+    const service = category === 'series' ? 'sonarr' : 'radarr';
+    try {
+      const history = await this.arr(service, '/history?pageSize=100&sortKey=date&sortDirection=descending');
+      const expected = String(hash).toLowerCase();
+      return (history?.records ?? history ?? []).some(item =>
+        item.eventType === 'downloadFolderImported' &&
+        String(item.downloadId ?? item.data?.downloadId ?? '').toLowerCase() === expected);
+    } catch {
+      return false;
+    }
+  }
+  async downloads() {
+    const torrents = (await this.qbit('/torrents/info')).map(normalizeTorrent);
+    const resolved = await Promise.all(torrents.map(async torrent => {
+      if (torrent.progress < 100) return { ...torrent, importStatus: 'downloading' };
+      const importStatus = await this.importStatusCache.get(torrent.hash, torrent.category);
+      return { ...torrent, importStatus, state: importStatus === 'awaiting_import' ? 'importing' : torrent.state };
+    }));
+    return resolved.filter(torrent => torrent.importStatus !== 'imported');
+  }
   async torrentAction(action, hash) {
     const endpoint = qbitActionEndpoint(action);
     const body = new URLSearchParams({ hashes: hash });
@@ -250,8 +274,77 @@ export class MediaClients {
     return null;
   }
 
+  async jellyfin(pathname, options = {}) {
+    if (!this.config.jellyfinApiKey) return null;
+    return jsonRequest(`${this.config.jellyfinUrl}${pathname}`, { ...options, headers: { 'x-emby-token': this.config.jellyfinApiKey, 'content-type': 'application/json', ...(options.headers ?? {}) } });
+  }
+
+  async managedMovie(radarrId) {
+    const movie = await this.arr('radarr', `/movie/${encodeURIComponent(radarrId)}`);
+    const root = path.resolve(this.config.libraryRoot ?? '/data/library/movies');
+    const moviePath = path.resolve(movie.path ?? '');
+    const relative = path.relative(root, moviePath);
+    if (!movie.path || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('Movie path is outside the managed library');
+    return movie;
+  }
+
+  async localSubtitlesForMovie(movie) {
+    const videoPath = movie.movieFile?.path;
+    if (!videoPath) return [];
+    const directory = path.dirname(videoPath);
+    const stem = path.basename(videoPath, path.extname(videoPath));
+    let entries = [];
+    try { entries = await fsp.readdir(directory, { withFileTypes: true }); } catch { return []; }
+    return entries.filter(entry => entry.isFile() && entry.name.startsWith(`${stem}.`) && /\.(srt|ass|ssa|vtt)$/i.test(entry.name)).map(entry => ({ id: subtitleIdFromName(entry.name), name: entry.name }));
+  }
+
+  async uploadLocalSubtitle(radarrId, value) {
+    const movie = await this.managedMovie(radarrId);
+    if (!movie.movieFile?.path) throw new Error('Movie file is unavailable');
+    const upload = decodeSubtitleUpload(value);
+    const name = subtitleFileName(movie.movieFile.path, { ...value, extension: upload.extension });
+    await fsp.writeFile(path.join(path.dirname(movie.movieFile.path), name), upload.buffer, { flag: value.replace ? 'w' : 'wx' });
+    await this.refreshSubtitles(radarrId);
+    await this.refreshJellyfin();
+    return { id: subtitleIdFromName(name), name };
+  }
+
+  async managedSubtitles(radarrId) {
+    return this.localSubtitlesForMovie(await this.managedMovie(radarrId));
+  }
+
+  async deleteLocalSubtitle(radarrId, subtitleId) {
+    const movie = await this.managedMovie(radarrId);
+    if (!movie.movieFile?.path) throw new Error('Movie file is unavailable');
+    const name = subtitleNameFromId(subtitleId);
+    await fsp.unlink(path.join(path.dirname(movie.movieFile.path), name));
+    await this.refreshSubtitles(radarrId);
+    await this.refreshJellyfin();
+    return { deleted: true, id: subtitleId };
+  }
+
+  async deleteManagedMovie(radarrId) {
+    await this.managedMovie(radarrId);
+    const history = await this.arr('radarr', `/history?movieId=${encodeURIComponent(radarrId)}&pageSize=100`);
+    const torrentHashes = [...new Set((history?.records ?? history ?? []).map(item => item.data?.torrentInfoHash?.toLowerCase()).filter(Boolean))];
+    await this.arr('radarr', `/movie/${encodeURIComponent(radarrId)}?deleteFiles=true&addImportExclusion=false`, { method: 'DELETE' });
+    try {
+      for (const hash of torrentHashes) await this.torrentAction('delete', hash);
+    } catch (error) {
+      await this.refreshJellyfin();
+      return { status: 'partial_failure', torrentHashes, error: 'Không thể xóa dữ liệu torrent' };
+    }
+    await this.refreshJellyfin();
+    return { status: 'deleted', torrentHashes };
+  }
+
   async library() {
-    if (!this.config.jellyfinApiKey) return [];
-    return jsonRequest(`${this.config.jellyfinUrl}/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Overview,Path,UserData`, { headers: { 'x-emby-token': this.config.jellyfinApiKey } });
+    const movies = await this.arr('radarr', '/movie');
+    const jellyfin = await this.jellyfin('/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Overview,Path,UserData,ProviderIds') ?? { Items: [] };
+    return Promise.all(movies.filter(movie => movie.hasFile !== false && movie.movieFile?.path).map(async movie => {
+      const item = (jellyfin.Items ?? []).find(value => value.Path === movie.movieFile.path);
+      const subtitles = await this.localSubtitlesForMovie(movie);
+      return normalizeLibraryMovie(movie, item, subtitles.length);
+    }));
   }
 }

@@ -134,16 +134,49 @@ $public = Invoke-RestMethod http://localhost:8096/System/Info/Public
 if (-not $public.StartupWizardCompleted) {
   Invoke-Json POST http://localhost:8096/Startup/Configuration @{} @{UICulture='en-US';MetadataCountryCode='US';PreferredMetadataLanguage='en'} | Out-Null
   Invoke-Json POST http://localhost:8096/Startup/User @{} @{Name=$user;Password=$password} | Out-Null
-  Invoke-Json POST http://localhost:8096/Startup/RemoteAccess @{} @{EnableRemoteAccess=$false;EnableAutomaticPortMapping=$false} | Out-Null
+  Invoke-Json POST http://localhost:8096/Startup/RemoteAccess @{} @{EnableRemoteAccess=$true;EnableAutomaticPortMapping=$false} | Out-Null
   Invoke-Json POST http://localhost:8096/Startup/Complete @{} @{} | Out-Null
 }
 $authHeader = @{Authorization='MediaBrowser Client="MediaControl", Device="Windows", DeviceId="media-control-local", Version="1.0"'}
 $auth = Invoke-Json POST http://localhost:8096/Users/AuthenticateByName $authHeader @{Username=$user;Pw=$password}
 $token = $auth.AccessToken
 $jHeaders = @{'X-Emby-Token'=$token}
+Write-Output 'Configuring Jellyfin LAN access...'
+$jellyfinConfig = Invoke-Json GET http://localhost:8096/System/Configuration/network $jHeaders
+Set-Property $jellyfinConfig EnableRemoteAccess $true
+Set-Property $jellyfinConfig EnableUPnP $false
+Set-Property $jellyfinConfig EnableHttps $false
+Set-Property $jellyfinConfig BaseUrl ''
+Invoke-Json POST http://localhost:8096/System/Configuration/network $jHeaders $jellyfinConfig | Out-Null
 $folders = Invoke-Json GET http://localhost:8096/Library/VirtualFolders $jHeaders
 if (-not ($folders | Where-Object Name -eq 'Movies')) { Invoke-RestMethod 'http://localhost:8096/Library/VirtualFolders?name=Movies&collectionType=movies&paths=%2Fdata%2Flibrary%2Fmovies&refreshLibrary=true' -Method Post -Headers $jHeaders | Out-Null }
 if (-not ($folders | Where-Object Name -eq 'Series')) { Invoke-RestMethod 'http://localhost:8096/Library/VirtualFolders?name=Series&collectionType=tvshows&paths=%2Fdata%2Flibrary%2Fseries&refreshLibrary=true' -Method Post -Headers $jHeaders | Out-Null }
+
+function Ensure-JellyfinConnect($port, $key) {
+  $base = "http://localhost:$port/api/v3"
+  $headers = @{'X-Api-Key'=$key}
+  $existingNotifications = @(Invoke-Json GET "$base/notification" $headers)
+  $existing = $existingNotifications | Where-Object { $_.name -eq 'Media Jellyfin' } | Select-Object -First 1
+  if ($null -ne $existing) { return }
+  $schemas = Invoke-Json GET "$base/notification/schema" $headers
+  $schema = $schemas | Where-Object implementation -eq 'MediaBrowser' | Select-Object -First 1
+  if (-not $schema) { throw "MediaBrowser notification schema not found on port $port" }
+  $target = $schema
+  Set-Property $target name 'Media Jellyfin'
+  if ($target.PSObject.Properties.Name -contains 'enable') { $target.enable = $true }
+  foreach ($eventName in @('onDownload','onUpgrade','onRename','onMovieDelete','onSeriesDelete','onEpisodeFileDelete')) {
+    if ($target.PSObject.Properties.Name -contains $eventName) { $target.$eventName = $true }
+  }
+  Set-Field $target host 'jellyfin'; Set-Field $target port 8096; Set-Field $target useSsl $false
+  Set-Field $target apiKey $token; Set-Field $target updateLibrary $true
+  Invoke-Json POST "$base/notification" $headers $target | Out-Null
+}
+Write-Output 'Configuring Radarr Jellyfin Connect...'
+Ensure-JellyfinConnect 7878 $radarrKey
+Write-Output 'Configuring Sonarr Jellyfin Connect...'
+Ensure-JellyfinConnect 8989 $sonarrKey
+Write-Output 'Refreshing Jellyfin library...'
+Invoke-RestMethod http://localhost:8096/Library/Refresh -Method Post -Headers $jHeaders | Out-Null
 
 $lines = Get-Content $EnvPath
 if ($lines -match '^JELLYFIN_API_KEY=') { $lines = $lines -replace '^JELLYFIN_API_KEY=.*$', "JELLYFIN_API_KEY=$token" } else { $lines += "JELLYFIN_API_KEY=$token" }
@@ -186,4 +219,4 @@ foreach ($line in [IO.File]::ReadAllLines($bazarrPath)) {
 docker compose --env-file (Join-Path $ProjectDir '.env.compose') restart bazarr | Out-Null
 docker compose --env-file (Join-Path $ProjectDir '.env.compose') up -d --force-recreate api | Out-Null
 
-Write-Output 'Configured qBittorrent, Radarr, Sonarr, Prowlarr (Internet Archive + YTS), Bazarr and Jellyfin.'
+Write-Output 'Configured qBittorrent, Radarr, Sonarr, Prowlarr (YTS), Bazarr and Jellyfin.'

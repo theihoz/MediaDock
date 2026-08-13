@@ -33,6 +33,7 @@ const media = new MediaClients({
   qbitPassword: process.env.LOCAL_ADMIN_PASSWORD ?? 'media1234',
   jellyfinUrl: registry.jellyfin.url,
   jellyfinApiKey: process.env.JELLYFIN_API_KEY,
+  libraryRoot: process.env.MOVIES_ROOT ?? '/data/library/movies',
 });
 
 const subtitleTokenSecret = process.env.SUBTITLE_TOKEN_SECRET ?? 'local-development-change-me';
@@ -86,11 +87,11 @@ function send(res, status, body) {
   res.end(JSON.stringify(body));
 }
 
-async function body(req) {
+async function body(req, maxBytes = 1024 * 1024) {
   let value = '';
   for await (const chunk of req) {
     value += chunk;
-    if (value.length > 1024 * 1024) throw new Error('Request body too large');
+    if (value.length > maxBytes) throw new Error('Request body too large');
   }
   return value ? JSON.parse(value) : {};
 }
@@ -117,9 +118,12 @@ async function route(req, res) {
   if (req.method === 'DELETE' && match) { await media.torrentAction('delete', match[1]); return send(res, 202, { hash: match[1], action: 'delete' }); }
 
   if (req.method === 'GET' && url.pathname === '/v1/library') return send(res, 200, await media.library());
+  if (req.method === 'POST' && url.pathname === '/v1/library/refresh') { await media.refreshJellyfin(); return send(res, 202, { state: 'scanning' }); }
   if (req.method === 'GET' && url.pathname === '/v1/library/subtitle-media') return send(res, 200, await media.subtitleMedia());
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles$/);
-  if (req.method === 'GET' && match) return send(res, 200, await media.subtitles(match[1]));
+  if (req.method === 'GET' && match) return send(res, 200, await media.managedSubtitles(match[1]));
+  match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/upload$/);
+  if (req.method === 'POST' && match) return send(res, 201, await media.uploadLocalSubtitle(match[1], await body(req, 7 * 1024 * 1024)));
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/search$/);
   if (req.method === 'GET' && match) {
     const language = url.searchParams.get('language') ?? 'vi';
@@ -158,14 +162,15 @@ async function route(req, res) {
     return send(res, 202, { mediaId: Number(match[1]), language: payload.language, provider: 'YIFY Direct' });
   }
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/([^/]+)$/);
-  if (req.method === 'DELETE' && match) return send(res, 202, await media.deleteSubtitle(match[1], {
-    path: decodeURIComponent(match[2]),
-    language: url.searchParams.get('language'),
-    forced: url.searchParams.get('forced') === 'true',
-    hi: url.searchParams.get('hi') === 'true',
-  }));
+  if (req.method === 'DELETE' && match) return send(res, 202, await media.deleteLocalSubtitle(match[1], match[2]));
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/refresh$/);
   if (req.method === 'POST' && match) return send(res, 202, await media.refreshSubtitles(match[1]));
+  match = url.pathname.match(/^\/v1\/library\/(\d+)$/);
+  if (req.method === 'DELETE' && match) {
+    const value = await body(req);
+    if (value.deleteFiles !== true || value.deleteTorrent !== true) return send(res, 400, { error: 'delete_confirmation_required' });
+    return send(res, 200, await media.deleteManagedMovie(match[1]));
+  }
 
   return send(res, 404, { error: 'not_found' });
 }

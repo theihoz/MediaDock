@@ -1,8 +1,10 @@
 import http from 'node:http';
+import os from 'node:os';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { authorize, canStopService, composeArgs, services, wholeStackCommands } from './controller.mjs';
 import { handleMaintenanceRequest, MaintenanceCleaner, startMaintenanceSchedule } from './maintenance.mjs';
+import { selectLanAddress } from './tv-network.mjs';
 
 const exec = promisify(execFile);
 const port = Number(process.env.HOST_CONTROLLER_PORT ?? 3210);
@@ -54,6 +56,15 @@ async function handle(req, res) {
     return send(res, 200, { state, services: current });
   }
   if (req.method === 'GET' && url.pathname === '/host/services') return send(res, 200, await listServices());
+  if (req.method === 'GET' && url.pathname === '/host/tv/status') {
+    const lan = selectLanAddress(os.networkInterfaces());
+    let reachable = false;
+    try {
+      const response = await fetch('http://127.0.0.1:8096/System/Info/Public', { signal: AbortSignal.timeout(2000) });
+      reachable = response.ok;
+    } catch {}
+    return send(res, 200, { ...lan, reachable, tcpPort: 8096, discoveryPort: 7359 });
+  }
 
   const whole = url.pathname.match(/^\/host\/(start|stop|restart)$/);
   if (req.method === 'POST' && whole) {
