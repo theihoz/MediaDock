@@ -1,0 +1,178 @@
+name: media-stack
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "2"
+
+x-common: &common
+  restart: "no"
+  networks: [media]
+  logging: *logging
+
+x-arr-environment: &arr-environment
+  PUID: ${PUID:-1000}
+  PGID: ${PGID:-1000}
+  TZ: ${TZ:-Asia/Ho_Chi_Minh}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_DB: media
+      POSTGRES_USER: media
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: ["postgres_data:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U media -d media"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    networks: [media]
+    logging: *logging
+
+  redis:
+    image: redis:7-alpine
+    restart: "no"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
+    volumes: ["redis_data:/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD ping | grep PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    networks: [media]
+    logging: *logging
+
+  qbittorrent:
+    <<: *common
+    image: lscr.io/linuxserver/qbittorrent:latest
+    environment:
+      <<: *arr-environment
+      WEBUI_PORT: 8080
+      TORRENTING_PORT: 6881
+    volumes:
+      - "${MEDIA_ROOT}/config/qbittorrent:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["8080:8080", "6881:6881", "6881:6881/udp"]
+
+  prowlarr:
+    <<: *common
+    image: lscr.io/linuxserver/prowlarr:latest
+    environment: *arr-environment
+    volumes: ["${MEDIA_ROOT}/config/prowlarr:/config"]
+    ports: ["9696:9696"]
+
+  radarr:
+    <<: *common
+    image: lscr.io/linuxserver/radarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/radarr:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["7878:7878"]
+
+  sonarr:
+    <<: *common
+    image: lscr.io/linuxserver/sonarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/sonarr:/config"
+      - "${MEDIA_ROOT}:/data"
+    ports: ["8989:8989"]
+
+  bazarr:
+    <<: *common
+    image: lscr.io/linuxserver/bazarr:latest
+    environment: *arr-environment
+    volumes:
+      - "${MEDIA_ROOT}/config/bazarr:/config"
+      - "${MEDIA_ROOT}/library:/data/library"
+      - "${MEDIA_ROOT}/backups:/backups"
+      - "./scripts/bazarr_profile.py:/opt/media-control/bazarr_profile.py:ro"
+    ports: ["6767:6767"]
+
+  jellyfin:
+    <<: *common
+    image: jellyfin/jellyfin:latest
+    volumes:
+      - "${MEDIA_ROOT}/config/jellyfin:/config"
+      - "${MEDIA_ROOT}/library:/data/library:ro"
+      - "${MEDIA_ROOT}/cache/jellyfin:/cache"
+    ports: ["8096:8096", "7359:7359/udp"]
+
+  seerr:
+    <<: *common
+    image: fallenbagel/jellyseerr:latest
+    volumes: ["${MEDIA_ROOT}/config/seerr:/app/config"]
+    ports: ["5055:5055"]
+
+  flaresolverr:
+    <<: *common
+    image: ghcr.io/flaresolverr/flaresolverr:latest
+    environment:
+      LOG_LEVEL: info
+      TZ: ${TZ:-Asia/Ho_Chi_Minh}
+
+  autobrr:
+    <<: *common
+    image: ghcr.io/autobrr/autobrr:latest
+    environment: *arr-environment
+    volumes: ["${MEDIA_ROOT}/config/autobrr:/config"]
+    ports: ["7474:7474"]
+
+  api:
+    build: ./backend
+    restart: "no"
+    depends_on:
+      postgres: { condition: service_healthy }
+      redis: { condition: service_healthy }
+    environment:
+      PORT: 3000
+      QBITTORRENT_URL: http://qbittorrent:8080
+      PROWLARR_URL: http://prowlarr:9696
+      RADARR_URL: http://radarr:7878
+      SONARR_URL: http://sonarr:8989
+      BAZARR_URL: http://bazarr:6767
+      JELLYFIN_URL: http://jellyfin:8096
+      SEERR_URL: http://seerr:5055
+      LOCAL_ADMIN_USER: ${LOCAL_ADMIN_USER:-admin}
+      LOCAL_ADMIN_PASSWORD: ${LOCAL_ADMIN_PASSWORD:-media1234}
+      JELLYFIN_API_KEY: ${JELLYFIN_API_KEY:-}
+      YIFY_DIRECT_ENABLED: ${YIFY_DIRECT_ENABLED:-false}
+      YIFY_DIRECT_BASE_URL: ${YIFY_DIRECT_BASE_URL:-}
+      SUBTITLE_TOKEN_SECRET: ${SUBTITLE_TOKEN_SECRET}
+      SEERR_CONFIG: /service-config/seerr/settings.json
+      TRENDING_CACHE: /data/cache/trending.json
+      TRENDING_TV_CACHE: /data/cache/trending-tv.json
+      YTS_MOVIE_API_URL: ${YTS_MOVIE_API_URL:-https://movies-api.accel.li}
+      YTS_OFFICIAL_TV_URL: ${YTS_OFFICIAL_TV_URL:-https://en.yts-official.com/}
+      YTS_OFFICIAL_TV_ENABLED: ${YTS_OFFICIAL_TV_ENABLED:-true}
+      TV_DOWNLOAD_TOKEN_SECRET: ${TV_DOWNLOAD_TOKEN_SECRET}
+      RADARR_CONFIG: /service-config/radarr/config.xml
+      SONARR_CONFIG: /service-config/sonarr/config.xml
+      PROWLARR_CONFIG: /service-config/prowlarr/config.xml
+      BAZARR_CONFIG: /service-config/bazarr.yaml
+    volumes:
+      # Docker Desktop resolves this Windows path consistently for both Arr and API.
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/radarr:/service-config/radarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/sonarr:/service-config/sonarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/prowlarr:/service-config/prowlarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/bazarr/config/config.yaml:/service-config/bazarr.yaml:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/seerr:/service-config/seerr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/library:/data/library"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/cache:/data/cache"
+    ports: ["3000:3000"]
+    networks: [media]
+    logging: *logging
+
+networks:
+  media: { name: media }
+
+volumes:
+  postgres_data: { name: media-stack-postgres-data, external: true }
+  redis_data: { name: media-stack-redis-data, external: true }
