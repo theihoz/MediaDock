@@ -16,6 +16,8 @@ export function apiKeyFrom(path) {
 export function normalizeRelease(value) {
   const title = value.title ?? '';
   const codec = /(?:x|h)[ ._-]?265|hevc/i.test(title) ? 'H.265' : /av1/i.test(title) ? 'AV1' : /(?:x|h)[ ._-]?264|avc/i.test(title) ? 'H.264' : 'Unknown';
+  const rejections = value.rejections ?? [];
+  const onlyNeedsMonitoring = rejections.length > 0 && rejections.every(reason => /^Episode wasn't requested:/i.test(reason));
   return {
     guid: value.guid,
     indexerId: value.indexerId,
@@ -26,8 +28,8 @@ export function normalizeRelease(value) {
     quality: value.quality?.quality?.name ?? 'Unknown',
     resolution: value.quality?.quality?.resolution ?? 0,
     codec,
-    rejected: Boolean(value.rejected ?? value.rejections?.length),
-    rejections: value.rejections ?? [],
+    rejected: onlyNeedsMonitoring ? false : Boolean(value.rejected ?? rejections.length),
+    rejections,
   };
 }
 
@@ -207,7 +209,23 @@ export class MediaClients {
   }
 
   async downloadSeriesRelease(tvdbId, selection) {
-    await this.ensureSeries(tvdbId);
+    const series = await this.ensureSeries(tvdbId);
+    if (selection.episodeId) {
+      const episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
+      await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`, {
+        method: 'PUT', body: JSON.stringify({ ...episode, monitored: true }),
+      });
+    } else if (selection.seasonNumber !== undefined) {
+      const seasonNumber = Number(selection.seasonNumber);
+      await this.arr('sonarr', `/series/${series.id}`, {
+        method: 'PUT', body: JSON.stringify({
+          ...series,
+          seasons: (series.seasons ?? []).map(season => ({
+            ...season, monitored: Number(season.seasonNumber) === seasonNumber ? true : season.monitored,
+          })),
+        }),
+      });
+    }
     return this.arr('sonarr', '/release', { method: 'POST', body: JSON.stringify({ guid: selection.guid, indexerId: selection.indexerId }) });
   }
 

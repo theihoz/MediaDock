@@ -66,6 +66,15 @@ test('normalizes a Radarr release for the desktop client', () => {
   });
 });
 
+test('keeps a manually selected Sonarr release actionable when only monitoring is missing', () => {
+  const release = normalizeRelease({
+    guid: 'g', indexerId: 2, title: 'Show S01E01 1080p',
+    rejected: true, rejections: ["Episode wasn't requested: 1x1"],
+  });
+  assert.equal(release.rejected, false);
+  assert.deepEqual(release.rejections, ["Episode wasn't requested: 1x1"]);
+});
+
 test('normalizes qBittorrent data without leaking tracker credentials', () => {
   const torrent = normalizeTorrent({ hash: 'h', name: 'Movie', progress: .5, dlspeed: 10, eta: 20, size: 30, state: 'downloading', tracker: 'https://user:pass@example.test' });
   assert.equal(torrent.progress, 50);
@@ -174,13 +183,34 @@ test('returns episodes and only exact season packs from Sonarr releases', async 
   assert.deepEqual(releases.map(item => item.guid), ['pack']);
 });
 
-test('downloads only the explicitly selected Sonarr release', async () => {
+test('monitors only the selected episode before downloading its Sonarr release', async () => {
   const media = new MediaClients({});
   media.ensureSeries = async () => ({ id: 7 });
-  let sent;
-  media.arr = async (_service, requestPath, options) => { sent = { requestPath, body: JSON.parse(options.body) }; return {}; };
+  const sent = [];
+  media.arr = async (_service, requestPath, options) => {
+    if (requestPath === '/episode/91' && !options) return { id: 91, seriesId: 7, monitored: false };
+    sent.push({ requestPath, method: options.method, body: JSON.parse(options.body) });
+    return {};
+  };
   await media.downloadSeriesRelease(123, { guid: 'g', indexerId: 4, episodeId: 91 });
-  assert.deepEqual(sent, { requestPath: '/release', body: { guid: 'g', indexerId: 4 } });
+  assert.deepEqual(sent, [
+    { requestPath: '/episode/91', method: 'PUT', body: { id: 91, seriesId: 7, monitored: true } },
+    { requestPath: '/release', method: 'POST', body: { guid: 'g', indexerId: 4 } },
+  ]);
+});
+
+test('monitors only the selected season before downloading its Sonarr pack', async () => {
+  const media = new MediaClients({});
+  media.ensureSeries = async () => ({ id: 7, seasons: [{ seasonNumber: 1, monitored: false }, { seasonNumber: 2, monitored: false }] });
+  const sent = [];
+  media.arr = async (_service, requestPath, options) => {
+    sent.push({ requestPath, method: options.method, body: JSON.parse(options.body) });
+    return {};
+  };
+  await media.downloadSeriesRelease(123, { guid: 'pack', indexerId: 4, seasonNumber: 2 });
+  assert.equal(sent[0].requestPath, '/series/7');
+  assert.deepEqual(sent[0].body.seasons, [{ seasonNumber: 1, monitored: false }, { seasonNumber: 2, monitored: true }]);
+  assert.deepEqual(sent[1], { requestPath: '/release', method: 'POST', body: { guid: 'pack', indexerId: 4 } });
 });
 
 test('normalizes the managed Radarr library and matches Jellyfin by path', async t => {
