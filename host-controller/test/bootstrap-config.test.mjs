@@ -8,12 +8,12 @@ test('bootstrap disables Internet Archive and leaves YTS enabled', () => {
   assert.match(script, /Where-Object name -eq 'YTS'[\s\S]+Set-Property \$yts enable \$true/);
 });
 
-test('bootstrap keeps EZTV but disables it idempotently', () => {
+test('bootstrap enables EZTV idempotently as the TV fallback', () => {
   const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
   assert.match(script, /Where-Object name -eq 'EZTV'/);
   assert.match(script, /Where-Object \{ \$_\.name -eq 'EZTV' \} \| Select-Object -First 1/);
   assert.match(script, /Set-Property \$eztv name 'EZTV'/);
-  assert.match(script, /Set-Property \$eztv enable \$false/);
+  assert.match(script, /Set-Property \$eztv enable \$true/);
   assert.match(script, /Set-Field \$eztv baseUrl 'https:\/\/eztvx\.to\/'/);
   assert.match(script, /implementation -eq 'FlareSolverr'/);
   assert.match(script, /Set-Field \$proxy host 'http:\/\/flaresolverr:8191\/'/);

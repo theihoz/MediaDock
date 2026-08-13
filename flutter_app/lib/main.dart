@@ -710,6 +710,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
   int? selectedSeason;
   int? releaseEpisodeId;
   bool busy = false;
+  bool showingEpisodes = false;
   bool showingSearch = false;
   bool trendingStale = false;
   String trendingSource = 'unavailable';
@@ -722,18 +723,31 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
   }
 
   Future<void> loadTrending() async {
-    setState(() { busy = true; error = null; showingSearch = false; });
+    setState(() {
+      busy = true;
+      error = null;
+      showingSearch = false;
+    });
     try {
       final result = await widget.api.gateway('/v1/series/trending');
       if (!mounted) return;
       setState(() {
         trending = result is List ? result : (result['items'] ?? []);
         trendingStale = result is Map && result['stale'] == true;
-        trendingSource = result is Map ? '${result['source'] ?? 'unavailable'}' : 'unavailable';
+        trendingSource = result is Map
+            ? '${result['source'] ?? 'unavailable'}'
+            : 'unavailable';
       });
     } catch (_) {
-      if (mounted) setState(() { trending = []; error = 'Chưa tải được TV Show thịnh hành'; });
-    } finally { if (mounted) setState(() => busy = false); }
+      if (mounted) {
+        setState(() {
+          trending = [];
+          error = 'Chưa tải được TV Show thịnh hành';
+        });
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
   }
 
   @override
@@ -772,9 +786,14 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
     try {
       var target = item;
       if ((item['tvdbId'] ?? 0) == 0) {
-        final matches = await widget.api.gateway('/v1/series/search?q=${Uri.encodeQueryComponent(item['title'])}');
-        final exact = (matches as List).where((candidate) => candidate['year'] == item['year']).toList();
-        if (exact.isEmpty) throw Exception('Không ánh xạ được TV Show sang Sonarr');
+        final matches = await widget.api.gateway(
+            '/v1/series/search?q=${Uri.encodeQueryComponent(item['title'])}');
+        final exact = (matches as List)
+            .where((candidate) => candidate['year'] == item['year'])
+            .toList();
+        if (exact.isEmpty) {
+          throw Exception('Không ánh xạ được TV Show sang Sonarr');
+        }
         target = Map<String, dynamic>.from(exact.first);
         if (mounted) setState(() => selected = target);
       }
@@ -792,6 +811,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
         episodes = values;
         selectedSeason = seasons.isEmpty ? null : seasons.first;
       });
+      if (selectedSeason != null) await findReleases();
     } catch (_) {
       if (mounted) setState(() => error = 'Không tải được danh sách tập');
     } finally {
@@ -806,6 +826,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
       error = null;
       releases = [];
       releaseEpisodeId = episodeId;
+      showingEpisodes = false;
     });
     final scope = episodeId == null
         ? 'seasonNumber=$selectedSeason'
@@ -816,11 +837,17 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
       if (mounted) setState(() => releases = value);
     } catch (exception) {
       if (mounted) {
-        setState(() => error = '$exception'.contains('yts_tv_release_unavailable') || '$exception'.contains('season_pack_unavailable')
-            ? 'Không có season pack. Hãy chọn từng tập bên dưới.'
-            : '$exception'.contains('yts_tv_provider_unavailable')
-                ? 'YTS Official đang tạm thời không kết nối được. Hãy thử lại.'
-            : 'Không tìm thấy bản tải phù hợp');
+        setState(() {
+          if (episodeId == null) showingEpisodes = true;
+          error = '$exception'.contains('tv_release_unavailable') ||
+                  '$exception'.contains('yts_tv_release_unavailable') ||
+                  '$exception'.contains('season_pack_unavailable')
+              ? 'Không có season pack. Hãy chọn từng tập bên dưới.'
+              : '$exception'.contains('tv_provider_unavailable') ||
+                      '$exception'.contains('yts_tv_provider_unavailable')
+                  ? 'Các nguồn TV đang tạm thời không kết nối được. Hãy thử lại.'
+                  : 'Không tìm thấy bản tải phù hợp';
+        });
       }
     } finally {
       if (mounted) setState(() => busy = false);
@@ -889,31 +916,89 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
                       const Padding(
                           padding: EdgeInsets.only(left: 10),
                           child: Chip(label: Text('Dữ liệu gần nhất'))),
-                    if (!trendingStale && !showingSearch && trendingSource == 'popular')
+                    if (!trendingStale &&
+                        !showingSearch &&
+                        trendingSource == 'popular')
                       const Padding(
                           padding: EdgeInsets.only(left: 10),
-                          child: Chip(label: Text('Phổ biến trên YTS Official'))),
+                          child:
+                              Chip(label: Text('Phổ biến trên YTS Official'))),
                   ]))),
         Expanded(
             child: (showingSearch ? series : trending).isEmpty
-                ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
-                    Text(showingSearch ? 'Không tìm thấy TV Show' : 'Chưa tải được TV Show thịnh hành'),
+                ? Center(
+                    child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text(showingSearch
+                        ? 'Không tìm thấy TV Show'
+                        : 'Chưa tải được TV Show thịnh hành'),
                     const SizedBox(height: 10),
-                    OutlinedButton.icon(onPressed: showingSearch ? search : loadTrending, icon: const Icon(Icons.refresh), label: const Text('Thử lại')),
+                    OutlinedButton.icon(
+                        onPressed: showingSearch ? search : loadTrending,
+                        icon: const Icon(Icons.refresh),
+                        label: const Text('Thử lại')),
                   ]))
-                : ListView(
-                    children: (showingSearch ? series : trending)
-                        .map((item) => Card(
-                            child: ListTile(
-                                title: Text(
-                                    '${item['title']} (${item['year'] ?? ''})'),
-                                subtitle: Text(item['overview'] ?? '',
-                                    maxLines: 2,
-                                    overflow: TextOverflow.ellipsis),
-                                onTap: () => openSeries(
-                                    Map<String, dynamic>.from(item)))))
-                        .toList()))
+                : LayoutBuilder(builder: (context, constraints) {
+                    final columns = constraints.maxWidth >= 1100
+                        ? 6
+                        : constraints.maxWidth >= 760
+                            ? 4
+                            : constraints.maxWidth >= 480
+                                ? 3
+                                : 2;
+                    final items = showingSearch ? series : trending;
+                    return GridView.builder(
+                        gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
+                            crossAxisCount: columns,
+                            childAspectRatio: .62,
+                            crossAxisSpacing: 12,
+                            mainAxisSpacing: 12),
+                        itemCount: items.length,
+                        itemBuilder: (context, index) {
+                          final item = items[index];
+                          return Card(
+                              clipBehavior: Clip.antiAlias,
+                              child: InkWell(
+                                  onTap: () => openSeries(
+                                      Map<String, dynamic>.from(item)),
+                                  child: Column(
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
+                                      children: [
+                                        Expanded(
+                                            child:
+                                                _seriesPoster(item['poster'])),
+                                        Padding(
+                                            padding: const EdgeInsets.all(10),
+                                            child: Column(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  Text(
+                                                      '${item['title']} (${item['year'] ?? ''})',
+                                                      maxLines: 2,
+                                                      overflow: TextOverflow
+                                                          .ellipsis),
+                                                  if (item['rating'] != null)
+                                                    Text('★ ${item['rating']}',
+                                                        style: Theme.of(context)
+                                                            .textTheme
+                                                            .bodySmall),
+                                                  if (item['inLibrary'] == true)
+                                                    const Text(
+                                                        'Trong thư viện'),
+                                                ])),
+                                      ])));
+                        });
+                  }))
       ]);
+
+  Widget _seriesPoster(dynamic url) => url == null || '$url'.isEmpty
+      ? const Center(child: Icon(Icons.image_not_supported_outlined, size: 44))
+      : Image.network('$url',
+          width: double.infinity,
+          fit: BoxFit.cover,
+          errorBuilder: (_, __, ___) => const Center(
+              child: Icon(Icons.image_not_supported_outlined, size: 44)));
 
   Widget detailView() {
     final seasonNumbers = episodes
@@ -930,8 +1015,20 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
               }),
           icon: const Icon(Icons.arrow_back),
           label: const Text('Quay lại kết quả')),
-      Text('${selected!['title']} (${selected!['year'] ?? ''})',
-          style: Theme.of(context).textTheme.headlineSmall),
+      Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        SizedBox(
+            width: 150, height: 210, child: _seriesPoster(selected!['poster'])),
+        const SizedBox(width: 18),
+        Expanded(
+            child:
+                Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Text('${selected!['title']} (${selected!['year'] ?? ''})',
+              style: Theme.of(context).textTheme.headlineSmall),
+          const SizedBox(height: 8),
+          Text('${selected!['overview'] ?? ''}',
+              maxLines: 6, overflow: TextOverflow.ellipsis),
+        ])),
+      ]),
       const SizedBox(height: 8),
       Wrap(
           spacing: 12,
@@ -943,27 +1040,42 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
                     .map((number) => DropdownMenuItem(
                         value: number, child: Text('Season $number')))
                     .toList(),
-                onChanged: (value) => setState(() {
-                      selectedSeason = value;
-                      releases = [];
-                    })),
-            FilledButton(
-                onPressed: busy ? null : () => findReleases(),
-                child: const Text('Tìm season pack')),
+                onChanged: (value) {
+                  setState(() {
+                    selectedSeason = value;
+                    releases = [];
+                    showingEpisodes = false;
+                  });
+                  if (value != null) findReleases();
+                }),
           ]),
       if (busy) const LinearProgressIndicator(),
       if (error != null)
-        Text(error!,
-            style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        Row(children: [
+          Expanded(
+              child: Text(error!,
+                  style:
+                      TextStyle(color: Theme.of(context).colorScheme.error))),
+          OutlinedButton.icon(
+              onPressed:
+                  busy ? null : () => findReleases(episodeId: releaseEpisodeId),
+              icon: const Icon(Icons.refresh),
+              label: const Text('Thử lại')),
+        ]),
       Expanded(
-          child: releases.isNotEmpty
+          child: releases.isNotEmpty && !showingEpisodes
               ? ListView(
                   children: releases
                       .map((release) => Card(
                           child: ListTile(
-                              title: Text(release['title']),
+                              title: Row(children: [
+                                Expanded(child: Text(release['title'])),
+                                Chip(
+                                    label: Text(
+                                        '${release['source'] ?? 'Prowlarr'}')),
+                              ]),
                               subtitle: Text(
-                                  '${release['source'] ?? 'YTS Official'} • ${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']} • peer ${release['peers'] ?? 0}'),
+                                  '${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']} • peer ${release['peers'] ?? 0}${release['rejections'] is List && release['rejections'].isNotEmpty ? ' • ${release['rejections'].join(', ')}' : ''}'),
                               trailing: FilledButton(
                                   onPressed: release['rejected'] == true
                                       ? null
@@ -1103,6 +1215,7 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
   bool directAvailable = false;
   bool busy = false;
   int? mediaId;
+  String mediaType = 'movie';
   List<dynamic> media = [];
   List<dynamic> results = [];
   @override
@@ -1117,7 +1230,10 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
       if (!mounted) return;
       setState(() {
         media = value;
-        if (media.isNotEmpty) mediaId ??= media.first['mediaId'];
+        if (media.isNotEmpty) {
+          mediaId ??= media.first['mediaId'];
+          mediaType = '${media.first['type'] ?? 'movie'}';
+        }
       });
     } catch (e) {
       if (mounted) showError(context, e);
@@ -1131,9 +1247,10 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
     }
     setState(() => busy = true);
     try {
+      if (mediaType == 'episode' && direct) return;
       final path = direct
           ? '/v1/library/$mediaId/subtitles/yify/search?language=$language'
-          : '/v1/library/$mediaId/subtitles/search?language=$language&provider=$provider&directFallback=$directFallback';
+          : '/v1/library/$mediaId/subtitles/search?language=$language&provider=$provider&directFallback=${mediaType == 'movie' && directFallback}&mediaType=$mediaType';
       final value = await widget.api.gateway(path);
       if (!mounted) return;
       setState(() {
@@ -1163,8 +1280,9 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
   Future<void> refresh() async {
     if (mediaId == null) return;
     try {
-      await widget.api
-          .gateway('/v1/library/$mediaId/subtitles/refresh', method: 'POST');
+      await widget.api.gateway(
+          '/v1/library/$mediaId/subtitles/refresh${mediaType == 'episode' ? '?mediaType=episode' : ''}',
+          method: 'POST');
       if (mounted) {
         ScaffoldMessenger.of(context)
             .showSnackBar(const SnackBar(content: Text('Đã quét lại phụ đề')));
@@ -1188,15 +1306,23 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
                   child: DropdownButtonFormField<int>(
                       initialValue: mediaId,
                       decoration: const InputDecoration(
-                          labelText: 'Phim trong thư viện'),
+                          labelText: 'Phim / tập TV trong thư viện'),
                       items: media
                           .map<DropdownMenuItem<int>>((m) => DropdownMenuItem(
                               value: m['mediaId'],
-                              child: Text('${m['title']} (${m['year']})',
+                              child: Text(
+                                  '${m['type'] == 'episode' ? 'TV • ' : ''}${m['title']} (${m['year'] == 0 ? '' : m['year']})',
                                   overflow: TextOverflow.ellipsis)))
                           .toList(),
                       onChanged: (v) => setState(() {
                             mediaId = v;
+                            final selectedMedia = media
+                                .firstWhere((item) => item['mediaId'] == v);
+                            mediaType = '${selectedMedia['type'] ?? 'movie'}';
+                            if (mediaType == 'episode' &&
+                                provider == 'yify-direct') {
+                              provider = 'all';
+                            }
                             results = [];
                           }))),
               DropdownButton(
@@ -1208,29 +1334,36 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
                   onChanged: (v) => setState(() => language = v!)),
               DropdownButton(
                   value: provider,
-                  items: const [
-                    DropdownMenuItem(
+                  items: [
+                    const DropdownMenuItem(
                         value: 'all', child: Text('Tất cả provider')),
-                    DropdownMenuItem(value: 'bazarr', child: Text('Bazarr')),
-                    DropdownMenuItem(
+                    const DropdownMenuItem(
+                        value: 'bazarr', child: Text('Bazarr')),
+                    const DropdownMenuItem(
                         value: 'yifysubtitles', child: Text('YIFY qua Bazarr')),
-                    DropdownMenuItem(
+                    const DropdownMenuItem(
                         value: 'gestdown', child: Text('Gestdown')),
                     DropdownMenuItem(
-                        value: 'yify-direct', child: Text('YIFY Direct'))
+                        value: 'yify-direct',
+                        enabled: mediaType == 'movie',
+                        child: const Text('YIFY Direct'))
                   ],
                   onChanged: (v) => setState(() => provider = v!)),
               Row(mainAxisSize: MainAxisSize.min, children: [
                 Switch(
                     value: directFallback,
-                    onChanged: (v) => setState(() => directFallback = v)),
+                    onChanged: mediaType == 'episode'
+                        ? null
+                        : (v) => setState(() => directFallback = v)),
                 const Text('Cho phép YIFY Direct fallback')
               ]),
               FilledButton(
                   onPressed: busy ? null : () => search(),
                   child: const Text('Tìm qua Bazarr')),
               OutlinedButton(
-                  onPressed: busy ? null : () => search(direct: true),
+                  onPressed: busy || mediaType == 'episode'
+                      ? null
+                      : () => search(direct: true),
                   child: const Text('Tìm trực tiếp YIFY')),
               IconButton(
                   onPressed: refresh,

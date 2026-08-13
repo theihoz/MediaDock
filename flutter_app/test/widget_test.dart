@@ -410,23 +410,26 @@ void main() {
     expect(find.text('Đang thịnh hành'), findsOneWidget);
     expect(find.text('Phổ biến trên YTS Official'), findsOneWidget);
     expect(find.text('Trending Show (2024)'), findsOneWidget);
+    expect(find.byType(GridView), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Test');
     await tester.tap(find.text('Tìm'));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Test Show (2024)'));
+    await tester.tap(find.ancestor(
+        of: find.text('Test Show (2024)'), matching: find.byType(InkWell)));
     await tester.pumpAndSettle();
-    await tester.tap(find.text('Tìm season pack'));
-    await tester.pumpAndSettle();
+    expect(find.text('Tìm season pack'), findsNothing);
+    expect(find.byIcon(Icons.image_not_supported_outlined), findsWidgets);
     expect(find.textContaining('YTS Official'), findsOneWidget);
     await tester.tap(find.text('Tải'));
     await tester.pumpAndSettle();
-    expect(api.downloadBody,
-        {'downloadToken': 'opaque-token', 'seasonNumber': 1});
+    expect(
+        api.downloadBody, {'downloadToken': 'opaque-token', 'seasonNumber': 1});
   });
 
   testWidgets('clearing TV Show search restores trending', (tester) async {
     final api = SeriesApi();
-    await tester.pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
+    await tester
+        .pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
     await tester.tap(find.text('TV Show'));
     await tester.pumpAndSettle();
     await tester.enterText(find.byType(TextField), 'Test');

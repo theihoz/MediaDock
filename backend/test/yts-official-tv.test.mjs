@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   YtsOfficialTvProvider,
   filterTvTorrents,
+  normalizeSonarrTvRelease,
   normalizeTvTorrent,
 } from '../src/yts-official-tv.mjs';
 
@@ -60,6 +61,21 @@ test('provider verifies same-scope tokens and rejects tampering or cross-scope r
   assert.equal(provider.resolveToken(release.downloadToken, { tvdbId: 123, seasonNumber: 2, episodeNumber: 3 }).infoHash, 'abcdef0123456789abcdef0123456789abcdef01');
   assert.throws(() => provider.resolveToken(`${release.downloadToken}x`, { tvdbId: 123, seasonNumber: 2, episodeNumber: 3 }), /invalid_download_token/);
   assert.throws(() => provider.resolveToken(release.downloadToken, { tvdbId: 123, seasonNumber: 2, episodeNumber: 4 }), /invalid_download_token/);
+});
+
+test('normalizes a Sonarr fallback release behind the same opaque token contract', () => {
+  const release = normalizeSonarrTvRelease({
+    guid: 'sonarr-guid', indexerId: 7, indexer: 'EZTV', title: 'Show S02E03 1080p',
+    size: 1234, seeders: 9, peers: 12, quality: { quality: { name: 'WEBDL-1080p' } },
+  }, { tvdbId: 123, seasonNumber: 2, episodeNumber: 3 }, 'secret', 1000);
+  assert.equal(release.source, 'EZTV');
+  assert.equal(release.sourceMode, 'prowlarr');
+  assert.equal(release.fallbackUsed, true);
+  assert.equal('guid' in release, false);
+  const provider = new YtsOfficialTvProvider({ secret: 'secret', now: () => 1000 });
+  assert.deepEqual(provider.resolveToken(release.downloadToken, { tvdbId: 123, seasonNumber: 2, episodeNumber: 3 }), {
+    sourceMode: 'prowlarr', guid: 'sonarr-guid', indexerId: 7, title: 'Show S02E03 1080p', infoHash: null,
+  });
 });
 
 test('provider searches the public TV endpoint and returns only normalized exact releases', async () => {

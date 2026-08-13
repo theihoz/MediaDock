@@ -13,6 +13,7 @@ import {
   MediaClients,
   normalizeRelease,
   normalizeTorrent,
+  normalizeSubtitleEpisode,
   normalizeSubtitleMedia,
   qbitActionEndpoint,
   ReleaseSearchCache,
@@ -130,6 +131,12 @@ test('normalizes Bazarr movies for the Flutter selector', () => {
   });
 });
 
+test('normalizes Bazarr episodes for the same subtitle selector', () => {
+  assert.deepEqual(normalizeSubtitleEpisode({ sonarrEpisodeId: 91, seriesTitle: 'Show', episodeTitle: 'Pilot', season: 1, episode: 2, path: '/series/show.mkv' }), {
+    mediaId: 91, title: 'Show S01E02 • Pilot', year: 0, path: '/series/show.mkv', imdbId: null, poster: null, type: 'episode',
+  });
+});
+
 test('hides only completed torrents confirmed as imported', async () => {
   const media = new MediaClients({
     importStatusCache: { get: async hash => hash === 'done' ? 'imported' : 'awaiting_import' },
@@ -167,7 +174,7 @@ test('searches and normalizes Sonarr series by TVDB id', async () => {
   assert.deepEqual(await media.searchSeries('batman'), [{ mediaType: 'series', tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', poster: 'poster.jpg', inLibrary: false, seasons: [{ seasonNumber: 1 }] }]);
 });
 
-test('returns episodes and searches YTS Official with exact Sonarr scope metadata', async () => {
+test('uses YTS releases without calling Sonarr fallback', async () => {
   const searches = [];
   const media = new MediaClients({ tvProvider: { search: async scope => { searches.push(scope); return [{ downloadToken: 'token' }]; } } });
   media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
@@ -183,6 +190,25 @@ test('returns episodes and searches YTS Official with exact Sonarr scope metadat
     { tvdbId: 123, title: 'Show', year: 2024, seasonNumber: 1 },
     { tvdbId: 123, title: 'Show', year: 2024, seasonNumber: 1, episodeNumber: 2 },
   ]);
+});
+
+test('falls back to exact Sonarr season packs when YTS has no release', async () => {
+  const media = new MediaClients({ tvProvider: {
+    search: async () => { throw new Error('yts_tv_release_unavailable'); },
+    normalizeSonarr: (row, scope) => ({ title: row.title, source: row.indexer, sourceMode: 'prowlarr', fallbackUsed: true, scope }),
+  } });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.arr = async (_service, requestPath) => {
+    assert.equal(requestPath, '/release?seriesId=7&seasonNumber=2');
+    return [
+      { title: 'Show S02 pack', guid: 'g1', indexerId: 1, indexer: 'EZTV', fullSeason: true, seasonNumber: 2 },
+      { title: 'Show S02E01', guid: 'g2', indexerId: 2, indexer: 'Other', fullSeason: false, seasonNumber: 2 },
+      { title: 'Show S03 pack', guid: 'g3', indexerId: 2, indexer: 'Other', fullSeason: true, seasonNumber: 3 },
+    ];
+  };
+  const releases = await media.seriesReleases(123, { seasonNumber: 2 });
+  assert.deepEqual(releases.map(item => item.title), ['Show S02 pack']);
+  assert.equal(releases[0].source, 'EZTV');
 });
 
 test('monitors only the selected episode then adds its verified magnet to qBittorrent', async () => {
@@ -218,6 +244,23 @@ test('returns idempotent success without monitoring or adding a duplicate TV tor
   media.qbit = async requestPath => requestPath === '/torrents/info' ? [{ hash: 'B'.repeat(40) }] : assert.fail('must not add duplicate');
   assert.deepEqual(await media.downloadSeriesRelease(123, { downloadToken: 'token', seasonNumber: 2 }), { accepted: true, duplicate: true, hash: 'b'.repeat(40) });
   assert.equal(sent.length, 0);
+});
+
+test('grabs a verified Prowlarr fallback through Sonarr after monitoring the episode', async () => {
+  const media = new MediaClients({ tvProvider: { resolveToken: () => ({ sourceMode: 'prowlarr', guid: 'g', indexerId: 4, infoHash: null, title: 'Show S01E02' }) } });
+  media.ensureSeries = async () => ({ id: 7 });
+  const sent = [];
+  media.arr = async (_service, requestPath, options) => {
+    if (requestPath === '/episode/91' && !options) return { id: 91, seriesId: 7, seasonNumber: 1, episodeNumber: 2, monitored: false };
+    sent.push({ requestPath, method: options.method, body: JSON.parse(options.body) });
+    return {};
+  };
+  media.qbit = async () => assert.fail('Prowlarr grab must go through Sonarr');
+  assert.deepEqual(await media.downloadSeriesRelease(123, { downloadToken: 'token', episodeId: 91 }), { accepted: true, duplicate: false, hash: null });
+  assert.deepEqual(sent, [
+    { requestPath: '/episode/91', method: 'PUT', body: { id: 91, seriesId: 7, seasonNumber: 1, episodeNumber: 2, monitored: true } },
+    { requestPath: '/release', method: 'POST', body: { guid: 'g', indexerId: 4 } },
+  ]);
 });
 
 test('rejects legacy Sonarr release identifiers for TV downloads', async () => {

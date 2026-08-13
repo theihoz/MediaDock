@@ -48,8 +48,12 @@ export function verifyTvDownloadToken(token, secret, expectedScope, now = Date.n
     if (!encoded || !signature || extra || !safeEqual(signature, hmac(encoded, secret))) throw new Error('signature');
     const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
     if (Number(payload.expiresAt) < now || !scopeMatches(payload, expectedScope)) throw new Error('scope');
+    if (payload.sourceMode === 'prowlarr') {
+      if (!payload.guid || !Number.isInteger(Number(payload.indexerId))) throw new Error('fallback');
+      return { sourceMode: 'prowlarr', guid: payload.guid, indexerId: Number(payload.indexerId), title: payload.title, infoHash: null };
+    }
     const infoHash = infoHashFromMagnet(payload.magnetUrl);
-    return { magnetUrl: payload.magnetUrl, title: payload.title, infoHash };
+    return { sourceMode: 'yts', magnetUrl: payload.magnetUrl, title: payload.title, infoHash };
   } catch (error) {
     if (error instanceof TvProviderError) throw error;
     throw new TvProviderError('invalid_download_token');
@@ -75,10 +79,14 @@ function exactEpisode(title, seasonNumber, episodeNumber) {
 export function filterTvTorrents(rows, scope) {
   return (Array.isArray(rows) ? rows : []).filter(row => {
     if (!row?.title || typeof row.magnetUrl !== 'string' || !row.magnetUrl.startsWith('magnet:?')) return false;
-    return scope.episodeNumber === undefined
-      ? exactSeason(row.title, scope.seasonNumber)
-      : exactEpisode(row.title, scope.seasonNumber, scope.episodeNumber);
+    return matchesTvTitleScope(row.title, scope);
   });
+}
+
+export function matchesTvTitleScope(title, scope) {
+  return scope.episodeNumber === undefined
+    ? exactSeason(title, scope.seasonNumber)
+    : exactEpisode(title, scope.seasonNumber, scope.episodeNumber);
 }
 
 function releaseQuality(title) {
@@ -113,7 +121,7 @@ function normalizeTvDiscovery(value) {
 }
 
 export function normalizeTvTorrent(row, scope, secret, now = Date.now()) {
-  const payload = { ...scope, title: row.title, magnetUrl: row.magnetUrl };
+  const payload = { ...scope, sourceMode: 'yts', title: row.title, magnetUrl: row.magnetUrl };
   return {
     downloadToken: createTvDownloadToken(payload, secret, now),
     title: row.title,
@@ -123,8 +131,28 @@ export function normalizeTvTorrent(row, scope, secret, now = Date.now()) {
     quality: releaseQuality(row.title),
     codec: releaseCodec(row.title),
     source: 'YTS Official',
+    sourceMode: 'yts',
+    fallbackUsed: false,
     rejected: false,
     rejections: [],
+  };
+}
+
+export function normalizeSonarrTvRelease(row, scope, secret, now = Date.now()) {
+  const payload = { ...scope, sourceMode: 'prowlarr', title: row.title, guid: row.guid, indexerId: Number(row.indexerId) };
+  return {
+    downloadToken: createTvDownloadToken(payload, secret, now),
+    title: row.title ?? '',
+    size: Number(row.size ?? 0),
+    seeders: Number(row.seeders ?? 0),
+    peers: Number(row.peers ?? 0),
+    quality: row.quality?.quality?.name ?? releaseQuality(row.title ?? ''),
+    codec: releaseCodec(row.title ?? ''),
+    source: row.indexer ?? row.indexerName ?? 'Prowlarr',
+    sourceMode: 'prowlarr',
+    fallbackUsed: true,
+    rejected: Boolean(row.rejected ?? row.rejections?.length),
+    rejections: row.rejections ?? [],
   };
 }
 
@@ -195,5 +223,9 @@ export class YtsOfficialTvProvider {
 
   resolveToken(token, expectedScope) {
     return verifyTvDownloadToken(token, this.secret, expectedScope, this.now());
+  }
+
+  normalizeSonarr(row, scope) {
+    return normalizeSonarrTvRelease(row, scope, this.secret, this.now());
   }
 }

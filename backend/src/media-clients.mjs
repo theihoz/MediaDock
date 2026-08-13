@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
 import { decodeSubtitleUpload, ImportStatusCache, normalizeLibraryMovie, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
+import { matchesTvTitleScope } from './yts-official-tv.mjs';
 
 export function extractApiKey(text) {
   const match = text.match(/<ApiKey>([^<]+)<\/ApiKey>/i) ?? text.match(/^\s*apikey:\s*['"]?([^'"\s]+)['"]?\s*$/im);
@@ -97,6 +98,28 @@ export function normalizeSubtitleMedia(value) {
     poster: value.poster,
     type: 'movie',
   };
+}
+
+export function normalizeSubtitleEpisode(value) {
+  const season = String(Number(value.season ?? value.seasonNumber ?? 0)).padStart(2, '0');
+  const episode = String(Number(value.episode ?? value.episodeNumber ?? 0)).padStart(2, '0');
+  return {
+    mediaId: value.sonarrEpisodeId ?? value.episodeId,
+    title: `${value.seriesTitle ?? value.title ?? 'TV Show'} S${season}E${episode}${value.episodeTitle ? ` • ${value.episodeTitle}` : ''}`,
+    year: Number(value.year || 0),
+    path: value.path,
+    imdbId: value.imdbId ?? null,
+    poster: value.poster ?? null,
+    type: 'episode',
+  };
+}
+
+function buildEpisodeSubtitleDownloadQuery(episodeId, value) {
+  if (!value.provider || !value.subtitle) throw new Error('invalid subtitle selection');
+  return new URLSearchParams({
+    episodeid: String(episodeId), hi: String(Boolean(value.hi)), forced: String(Boolean(value.forced)),
+    original_format: String(Boolean(value.originalFormat ?? value.original_format)), provider: value.provider, subtitle: value.subtitle,
+  }).toString();
 }
 
 async function jsonRequest(url, options = {}) {
@@ -200,12 +223,31 @@ export class MediaClients {
     const series = await this.ensureSeries(tvdbId);
     const cacheKey = selection.episodeId ? `series:${tvdbId}:episode:${selection.episodeId}` : `series:${tvdbId}:season:${selection.seasonNumber}`;
     return this.releaseCache.get(cacheKey, async () => {
-      if (!this.tvProvider) throw new Error('yts_tv_provider_unavailable');
+      if (!this.tvProvider) throw new Error('tv_provider_unavailable');
+      let scope;
       if (selection.episodeId) {
         const episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
-        return this.tvProvider.search({ tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber });
+        scope = { tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber };
+      } else {
+        scope = { tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: Number(selection.seasonNumber) };
       }
-      return this.tvProvider.search({ tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: Number(selection.seasonNumber) });
+      try {
+        const yts = await this.tvProvider.search(scope);
+        if (yts.length) return yts;
+      } catch {}
+      try {
+        const path = selection.episodeId
+          ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
+          : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
+        let rows = await this.arr('sonarr', path);
+        rows = rows.filter(row => row.guid && Number.isInteger(Number(row.indexerId)) && matchesTvTitleScope(row.title ?? '', scope));
+        rows.sort((left, right) => Number(!/EZTV/i.test(left.indexer ?? left.indexerName ?? '')) - Number(!/EZTV/i.test(right.indexer ?? right.indexerName ?? '')));
+        const releases = rows.map(row => this.tvProvider.normalizeSonarr(row, scope));
+        if (releases.length) return releases;
+      } catch (error) {
+        const failed = new Error('tv_provider_unavailable'); failed.code = 'tv_provider_unavailable'; throw failed;
+      }
+      const unavailable = new Error('tv_release_unavailable'); unavailable.code = 'tv_release_unavailable'; throw unavailable;
     });
   }
 
@@ -220,9 +262,14 @@ export class MediaClients {
       scope.episodeNumber = Number(episode.episodeNumber);
     }
     const release = this.tvProvider.resolveToken(selection.downloadToken, scope);
-    const torrents = await this.qbit('/torrents/info');
-    if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === release.infoHash)) {
-      return { accepted: true, duplicate: true, hash: release.infoHash };
+    // Tokens issued before multi-provider support did not include sourceMode.
+    // A verified magnet can only be a direct YTS release, so keep them valid.
+    release.sourceMode ??= release.magnetUrl ? 'yts' : 'prowlarr';
+    if (release.sourceMode === 'yts') {
+      const torrents = await this.qbit('/torrents/info');
+      if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === release.infoHash)) {
+        return { accepted: true, duplicate: true, hash: release.infoHash };
+      }
     }
     if (episode) {
       await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`, {
@@ -240,11 +287,13 @@ export class MediaClients {
       });
     }
     try {
-      await this.qbit('/torrents/add', { method: 'POST', body: new URLSearchParams({ urls: release.magnetUrl, category: 'series' }) });
+      if (release.sourceMode === 'prowlarr') {
+        await this.arr('sonarr', '/release', { method: 'POST', body: JSON.stringify({ guid: release.guid, indexerId: release.indexerId }) });
+      } else {
+        await this.qbit('/torrents/add', { method: 'POST', body: new URLSearchParams({ urls: release.magnetUrl, category: 'series' }) });
+      }
     } catch {
-      const error = new Error('download_client_rejected');
-      error.code = 'download_client_rejected';
-      throw error;
+      const error = new Error('download_client_rejected'); error.code = 'download_client_rejected'; throw error;
     }
     return { accepted: true, duplicate: false, hash: release.infoHash };
   }
@@ -328,8 +377,14 @@ export class MediaClients {
   }
   async subtitles(radarrId) { return this.bazarr(`/movies?radarrid[]=${encodeURIComponent(radarrId)}`); }
   async subtitleMedia() {
-    const result = await this.bazarr('/movies?start=0&length=-1');
-    return (result?.data ?? result ?? []).map(normalizeSubtitleMedia);
+    const [movies, episodes] = await Promise.all([
+      this.bazarr('/movies?start=0&length=-1'),
+      this.bazarr('/episodes?start=0&length=-1').catch(() => []),
+    ]);
+    return [
+      ...(movies?.data ?? movies ?? []).map(normalizeSubtitleMedia),
+      ...(episodes?.data ?? episodes ?? []).map(normalizeSubtitleEpisode),
+    ];
   }
   async subtitleMovie(radarrId) {
     const result = await this.subtitles(radarrId);
@@ -350,6 +405,17 @@ export class MediaClients {
   }
   async refreshSubtitles(radarrId) {
     return this.bazarr(`/movies?radarrid=${encodeURIComponent(radarrId)}&action=scan-disk`, { method: 'PATCH', body: '{}' });
+  }
+  async searchEpisodeSubtitles(episodeId, language) {
+    const result = await this.bazarr(`/providers/episodes?episodeid=${encodeURIComponent(episodeId)}`);
+    if (Array.isArray(result)) return filterSubtitleResults(result, language);
+    return { ...result, data: filterSubtitleResults(result?.data ?? [], language) };
+  }
+  async downloadEpisodeSubtitle(episodeId, value) {
+    return this.bazarr(`/providers/episodes?${buildEpisodeSubtitleDownloadQuery(episodeId, value)}`, { method: 'POST', body: '{}' });
+  }
+  async refreshEpisodeSubtitles(episodeId) {
+    return this.bazarr(`/episodes?episodeid=${encodeURIComponent(episodeId)}&action=scan-disk`, { method: 'PATCH', body: '{}' });
   }
 
   async refreshJellyfin() {

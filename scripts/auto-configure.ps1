@@ -156,22 +156,21 @@ if (-not ($existingIndexers | Where-Object name -eq 'YTS')) {
   }
 }
 
-# EZTV is retained for rollback but disabled because TV discovery now uses
-# the YTS Official provider directly through the backend.
+# EZTV is the first Sonarr/Prowlarr fallback when YTS has no exact TV release.
 $existingEztv = $existingIndexers | Where-Object { $_.name -eq 'EZTV' } | Select-Object -First 1
 if (-not $existingEztv) {
   $indexerSchemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
   $eztv = $indexerSchemas | Where-Object name -eq 'EZTV' | Select-Object -First 1
   if ($eztv) {
     $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
-    Set-Property $eztv name 'EZTV'; Set-Property $eztv enable $false
+    Set-Property $eztv name 'EZTV'; Set-Property $eztv enable $true
     Set-Property $eztv tags @($flareTag.id)
     Set-Property $eztv appProfileId $profiles[0].id
     Set-Field $eztv baseUrl 'https://eztvx.to/'
     Invoke-Json POST "$pBase/indexer" $pHeaders $eztv | Out-Null
   }
-} elseif ($existingEztv.enable) {
-  Set-Property $existingEztv enable $false
+} elseif (-not $existingEztv.enable) {
+  Set-Property $existingEztv enable $true
   Invoke-Json PUT "$pBase/indexer/$($existingEztv.id)" $pHeaders $existingEztv | Out-Null
 }
 

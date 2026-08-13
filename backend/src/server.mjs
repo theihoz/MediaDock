@@ -76,11 +76,11 @@ function validSubtitleQuery(language, provider) {
   return ['vi', 'en'].includes(language) && ['all', 'bazarr', 'yifysubtitles', 'gestdown', 'yify-direct'].includes(provider);
 }
 
-function bazarrResults(result, language, provider) {
+function bazarrResults(result, language, provider, mediaType = 'movie') {
   const raw = result?.data ?? result ?? [];
   return filterSubtitleResults(raw, language, provider === 'bazarr' ? 'all' : provider).map(value => ({
     ...normalizeSubtitle(value, 'bazarr'),
-    downloadToken: createSubtitleToken({ source: 'bazarr', selection: value }, subtitleTokenSecret),
+    downloadToken: createSubtitleToken({ source: 'bazarr', mediaType, selection: value }, subtitleTokenSecret),
   }));
 }
 
@@ -155,7 +155,13 @@ async function route(req, res) {
   if (req.method === 'GET' && match) {
     const language = url.searchParams.get('language') ?? 'vi';
     const provider = url.searchParams.get('provider') ?? 'all';
+    const mediaType = url.searchParams.get('mediaType') ?? 'movie';
     if (!validSubtitleQuery(language, provider)) return send(res, 400, { error: 'invalid_request' });
+    if (!['movie', 'episode'].includes(mediaType) || (mediaType === 'episode' && provider === 'yify-direct')) return send(res, 400, { error: 'invalid_request' });
+    if (mediaType === 'episode') {
+      const bazarr = bazarrResults(await media.searchEpisodeSubtitles(match[1], language), language, provider, 'episode');
+      return send(res, 200, { data: bazarr, directEnabled: false });
+    }
     const movie = await media.subtitleMovie(match[1]);
     let bazarr = [];
     if (provider !== 'yify-direct') bazarr = bazarrResults(await media.searchSubtitles(match[1], language), language, provider);
@@ -175,7 +181,9 @@ async function route(req, res) {
     const value = await body(req);
     if (!value.downloadToken) return send(res, 400, { error: 'download_token_required' });
     const payload = verifySubtitleToken(value.downloadToken, subtitleTokenSecret);
-    if (payload.source === 'bazarr') return send(res, 202, await media.downloadSubtitle(match[1], payload.selection));
+    if (payload.source === 'bazarr') return send(res, 202, payload.mediaType === 'episode'
+      ? await media.downloadEpisodeSubtitle(match[1], payload.selection)
+      : await media.downloadSubtitle(match[1], payload.selection));
     if (payload.source !== 'yify-direct' || String(payload.mediaId) !== match[1]) return send(res, 400, { error: 'invalid_token_scope' });
     const movie = await media.subtitleMovie(match[1]);
     const downloaded = await unpackDirectSubtitle(await yify.download(payload.subtitleId));
@@ -191,7 +199,9 @@ async function route(req, res) {
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/([^/]+)$/);
   if (req.method === 'DELETE' && match) return send(res, 202, await media.deleteLocalSubtitle(match[1], match[2]));
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/refresh$/);
-  if (req.method === 'POST' && match) return send(res, 202, await media.refreshSubtitles(match[1]));
+  if (req.method === 'POST' && match) return send(res, 202, url.searchParams.get('mediaType') === 'episode'
+    ? await media.refreshEpisodeSubtitles(match[1])
+    : await media.refreshSubtitles(match[1]));
   match = url.pathname.match(/^\/v1\/library\/(\d+)$/);
   if (req.method === 'DELETE' && match) {
     const value = await body(req);
@@ -203,9 +213,9 @@ async function route(req, res) {
 }
 
 http.createServer((req, res) => route(req, res).catch(error => {
-  if (error instanceof TvProviderError || ['invalid_download_token', 'download_client_rejected'].includes(error.code ?? error.message)) {
+  if (error instanceof TvProviderError || ['tv_release_unavailable', 'tv_provider_unavailable', 'invalid_download_token', 'download_client_rejected'].includes(error.code ?? error.message)) {
     const code = error.code ?? error.message;
-    const status = code === 'yts_tv_release_unavailable' ? 404 : code === 'invalid_download_token' ? 400 : 502;
+    const status = ['yts_tv_release_unavailable', 'tv_release_unavailable'].includes(code) ? 404 : code === 'invalid_download_token' ? 400 : 502;
     return send(res, status, { error: code });
   }
   send(res, 502, { error: 'upstream_failed', message: error.message });
