@@ -11,7 +11,39 @@ import {
   normalizeTorrent,
   normalizeSubtitleMedia,
   qbitActionEndpoint,
+  ReleaseSearchCache,
 } from '../src/media-clients.mjs';
+
+test('coalesces release searches and caches the result until the ttl expires', async () => {
+  let calls = 0;
+  let now = 1000;
+  let resolveSearch;
+  const cache = new ReleaseSearchCache({ ttlMs: 600000, timeoutMs: 15000, now: () => now });
+  const search = () => {
+    calls += 1;
+    return new Promise(resolve => { resolveSearch = resolve; });
+  };
+
+  const first = cache.get('603', search);
+  const concurrent = cache.get('603', search);
+  assert.equal(calls, 1);
+  resolveSearch([{ guid: 'matrix' }]);
+  assert.deepEqual(await first, [{ guid: 'matrix' }]);
+  assert.deepEqual(await concurrent, [{ guid: 'matrix' }]);
+  assert.deepEqual(await cache.get('603', search), [{ guid: 'matrix' }]);
+  assert.equal(calls, 1);
+
+  now += 600001;
+  const expired = cache.get('603', search);
+  assert.equal(calls, 2);
+  resolveSearch([{ guid: 'matrix-2' }]);
+  assert.deepEqual(await expired, [{ guid: 'matrix-2' }]);
+});
+
+test('fails a release search with a useful timeout error', async () => {
+  const cache = new ReleaseSearchCache({ ttlMs: 600000, timeoutMs: 5 });
+  await assert.rejects(cache.get('414906', () => new Promise(() => {})), /15 giây/);
+});
 
 test('extracts an arr API key without exposing other XML settings', () => {
   assert.equal(extractApiKey('<Config><ApiKey>abc123</ApiKey><Password>hidden</Password></Config>'), 'abc123');

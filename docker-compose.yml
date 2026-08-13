@@ -1,8 +1,15 @@
 name: media-stack
 
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "10m"
+    max-file: "2"
+
 x-common: &common
   restart: "no"
   networks: [media]
+  logging: *logging
 
 x-arr-environment: &arr-environment
   PUID: ${PUID:-1000}
@@ -24,6 +31,7 @@ services:
       timeout: 5s
       retries: 12
     networks: [media]
+    logging: *logging
 
   redis:
     image: redis:7-alpine
@@ -38,6 +46,7 @@ services:
     environment:
       REDIS_PASSWORD: ${REDIS_PASSWORD}
     networks: [media]
+    logging: *logging
 
   qbittorrent:
     <<: *common
@@ -149,6 +158,7 @@ services:
       - "${MEDIA_ROOT}/cache:/data/cache"
     ports: ["3000:3000"]
     networks: [media]
+    logging: *logging
 
 networks:
   media: { name: media }

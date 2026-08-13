@@ -101,8 +101,49 @@ async function jsonRequest(url, options = {}) {
   return text ? JSON.parse(text) : null;
 }
 
+export class ReleaseSearchCache {
+  constructor({ ttlMs = 10 * 60 * 1000, timeoutMs = 15000, now = Date.now } = {}) {
+    this.ttlMs = ttlMs;
+    this.timeoutMs = timeoutMs;
+    this.now = now;
+    this.values = new Map();
+    this.inFlight = new Map();
+  }
+
+  async get(key, search) {
+    const cached = this.values.get(key);
+    if (cached && cached.expiresAt > this.now()) return cached.value;
+    if (this.inFlight.has(key)) return this.inFlight.get(key);
+
+    const pending = this.withTimeout(search()).then(value => {
+      this.values.set(key, { value, expiresAt: this.now() + this.ttlMs });
+      return value;
+    }).finally(() => this.inFlight.delete(key));
+    this.inFlight.set(key, pending);
+    return pending;
+  }
+
+  async withTimeout(promise) {
+    let timer;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(new Error('Tìm bản tải quá 15 giây. Hãy kiểm tra YTS trong Prowlarr rồi thử lại.')), this.timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+}
+
 export class MediaClients {
-  constructor(config) { this.config = config; this.qbitCookie = null; }
+  constructor(config) {
+    this.config = config;
+    this.qbitCookie = null;
+    this.releaseCache = config.releaseCache ?? new ReleaseSearchCache();
+  }
 
   arrKey(name) { return apiKeyFrom(this.config[`${name}Config`]); }
   arrUrl(name, path) { return `${this.config[`${name}Url`]}/api/v3${path}`; }
@@ -134,8 +175,10 @@ export class MediaClients {
   }
 
   async releases(tmdbId) {
-    const movie = await this.ensureMovie(tmdbId);
-    return (await this.arr('radarr', `/release?movieId=${movie.id}`)).map(normalizeRelease);
+    return this.releaseCache.get(String(tmdbId), async () => {
+      const movie = await this.ensureMovie(tmdbId);
+      return (await this.arr('radarr', `/release?movieId=${movie.id}`)).map(normalizeRelease);
+    });
   }
 
   async downloadRelease(tmdbId, selection) {

@@ -2,6 +2,7 @@ import http from 'node:http';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { authorize, canStopService, composeArgs, services, wholeStackCommands } from './controller.mjs';
+import { handleMaintenanceRequest, MaintenanceCleaner, startMaintenanceSchedule } from './maintenance.mjs';
 
 const exec = promisify(execFile);
 const port = Number(process.env.HOST_CONTROLLER_PORT ?? 3210);
@@ -9,8 +10,11 @@ const token = process.env.HOST_CONTROLLER_TOKEN;
 const projectDir = process.env.MEDIA_PROJECT_DIR;
 const docker = process.env.DOCKER_EXE ?? 'docker';
 const envFile = process.env.COMPOSE_ENV_FILE ?? '.env.compose';
+const mediaRoot = process.env.MEDIA_ROOT ?? 'D:/Media';
 
 if (!token || !projectDir) throw new Error('HOST_CONTROLLER_TOKEN and MEDIA_PROJECT_DIR are required');
+const maintenance = new MaintenanceCleaner({ mediaRoot });
+startMaintenanceSchedule(maintenance);
 
 function send(res, status, body) {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8' });
@@ -40,6 +44,9 @@ async function handle(req, res) {
   if (!authorize(req.headers, token)) return send(res, 401, { error: 'unauthorized' });
   const url = new URL(req.url, `http://${req.headers.host}`);
 
+  const maintenanceResult = await handleMaintenanceRequest(req.method, url.pathname, maintenance);
+  if (maintenanceResult) return send(res, maintenanceResult.status, maintenanceResult.body);
+
   if (req.method === 'GET' && url.pathname === '/host/status') {
     const current = await listServices();
     const running = current.filter(item => item.state === 'running');
@@ -51,10 +58,7 @@ async function handle(req, res) {
   const whole = url.pathname.match(/^\/host\/(start|stop|restart)$/);
   if (req.method === 'POST' && whole) {
     const commands = wholeStackCommands(whole[1]);
-    const command = whole[1] === 'start' && (await listServices()).length === 0
-      ? commands[1]
-      : commands[0];
-    await compose(command.slice(1));
+    await compose(commands[0].slice(1));
     return send(res, 202, { state: `${whole[1]}ing` });
   }
 

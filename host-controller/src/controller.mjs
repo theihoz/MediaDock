@@ -16,7 +16,7 @@ export function composeArgs(action, service) {
 }
 
 export function wholeStackCommands(action) {
-  if (action === 'start') return [['compose', 'start'], ['compose', 'up', '-d']];
+  if (action === 'start') return [['compose', 'up', '-d']];
   if (action === 'stop') return [['compose', 'stop']];
   if (action === 'restart') return [['compose', 'restart']];
   throw new Error(`Unsupported action: ${action}`);

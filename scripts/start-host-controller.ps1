@@ -13,6 +13,11 @@ $env:HOST_CONTROLLER_TOKEN = $values['HOST_CONTROLLER_TOKEN']
 $env:HOST_CONTROLLER_PORT = '3210'
 $env:MEDIA_PROJECT_DIR = $ProjectDir
 $env:COMPOSE_ENV_FILE = Join-Path $ProjectDir '.env.compose'
+$composeValues = @{}
+Get-Content $env:COMPOSE_ENV_FILE | ForEach-Object {
+  if ($_ -match '^([^#=]+)=(.*)$') { $composeValues[$matches[1]] = $matches[2] }
+}
+$env:MEDIA_ROOT = if ($composeValues['MEDIA_ROOT']) { $composeValues['MEDIA_ROOT'] } else { 'D:/Media' }
 $dockerCommand = Get-Command docker.exe -ErrorAction SilentlyContinue
 $env:DOCKER_EXE = if ($dockerCommand) { $dockerCommand.Source } else { 'docker' }
 try {

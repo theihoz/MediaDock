@@ -94,19 +94,13 @@ foreach ($target in @(@{name='Radarr';url='http://radarr:7878';key=$radarrKey},@
   }
 }
 
-# A credential-less, public-domain source. Do not silently enable general-purpose
-# piracy indexers; users may add other lawful providers themselves.
+# Internet Archive is retained when already configured, but disabled because its
+# upstream search frequently times out and blocks Radarr's complete result set.
 $existingIndexers = Invoke-Json GET "$pBase/indexer" $pHeaders
-if (-not ($existingIndexers | Where-Object name -eq 'Internet Archive')) {
-  $indexerSchemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
-  $archive = $indexerSchemas | Where-Object name -eq 'Internet Archive' | Select-Object -First 1
-  if ($archive) {
-    $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
-    Set-Property $archive name 'Internet Archive'; Set-Property $archive enable $true
-    Set-Property $archive appProfileId $profiles[0].id
-    Set-Field $archive baseUrl $archive.indexerUrls[0]
-    Invoke-Json POST "$pBase/indexer" $pHeaders $archive | Out-Null
-  }
+$archive = $existingIndexers | Where-Object name -eq 'Internet Archive' | Select-Object -First 1
+if ($archive -and $archive.enable) {
+  Set-Property $archive enable $false
+  Invoke-Json PUT "$pBase/indexer/$($archive.id)" $pHeaders $archive | Out-Null
 }
 
 # YTS is explicitly requested for authorized/local use. Its API does not

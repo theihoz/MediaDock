@@ -23,11 +23,8 @@ test('protects infrastructure dependencies while api is running', () => {
   assert.equal(canStopService('radarr', new Set(['api'])).allowed, true);
 });
 
-test('whole stack start prefers existing stopped containers', () => {
-  assert.deepEqual(wholeStackCommands('start'), [
-    ['compose', 'start'],
-    ['compose', 'up', '-d'],
-  ]);
+test('whole stack start applies compose changes only after the user requests start', () => {
+  assert.deepEqual(wholeStackCommands('start'), [['compose', 'up', '-d']]);
   assert.deepEqual(wholeStackCommands('stop'), [['compose', 'stop']]);
   assert.deepEqual(wholeStackCommands('restart'), [['compose', 'restart']]);
   assert.throws(() => wholeStackCommands('remove'), /Unsupported action/);
