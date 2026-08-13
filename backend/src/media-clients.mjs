@@ -146,6 +146,7 @@ export class ReleaseSearchCache {
 export class MediaClients {
   constructor(config) {
     this.config = config;
+    this.tvProvider = config.tvProvider;
     this.qbitCookie = null;
     this.releaseCache = config.releaseCache ?? new ReleaseSearchCache();
     this.importStatusCache = config.importStatusCache ?? new ImportStatusCache({ lookup: (hash, category) => this.isImported(hash, category) });
@@ -199,19 +200,31 @@ export class MediaClients {
     const series = await this.ensureSeries(tvdbId);
     const cacheKey = selection.episodeId ? `series:${tvdbId}:episode:${selection.episodeId}` : `series:${tvdbId}:season:${selection.seasonNumber}`;
     return this.releaseCache.get(cacheKey, async () => {
-      const path = selection.episodeId
-        ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
-        : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
-      let releases = await this.arr('sonarr', path);
-      if (!selection.episodeId) releases = releases.filter(item => item.fullSeason === true && Number(item.seasonNumber) === Number(selection.seasonNumber));
-      return releases.map(normalizeRelease);
+      if (!this.tvProvider) throw new Error('yts_tv_provider_unavailable');
+      if (selection.episodeId) {
+        const episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
+        return this.tvProvider.search({ tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber });
+      }
+      return this.tvProvider.search({ tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: Number(selection.seasonNumber) });
     });
   }
 
   async downloadSeriesRelease(tvdbId, selection) {
+    if (!selection.downloadToken || !this.tvProvider) throw new Error('invalid_download_token');
     const series = await this.ensureSeries(tvdbId);
+    let episode;
+    const scope = { tvdbId: Number(tvdbId), seasonNumber: Number(selection.seasonNumber) };
     if (selection.episodeId) {
-      const episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
+      episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
+      scope.seasonNumber = Number(episode.seasonNumber);
+      scope.episodeNumber = Number(episode.episodeNumber);
+    }
+    const release = this.tvProvider.resolveToken(selection.downloadToken, scope);
+    const torrents = await this.qbit('/torrents/info');
+    if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === release.infoHash)) {
+      return { accepted: true, duplicate: true, hash: release.infoHash };
+    }
+    if (episode) {
       await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`, {
         method: 'PUT', body: JSON.stringify({ ...episode, monitored: true }),
       });
@@ -226,7 +239,14 @@ export class MediaClients {
         }),
       });
     }
-    return this.arr('sonarr', '/release', { method: 'POST', body: JSON.stringify({ guid: selection.guid, indexerId: selection.indexerId }) });
+    try {
+      await this.qbit('/torrents/add', { method: 'POST', body: new URLSearchParams({ urls: release.magnetUrl, category: 'series' }) });
+    } catch {
+      const error = new Error('download_client_rejected');
+      error.code = 'download_client_rejected';
+      throw error;
+    }
+    return { accepted: true, duplicate: false, hash: release.infoHash };
   }
 
   async movie(tmdbId) {

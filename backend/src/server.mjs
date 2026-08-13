@@ -10,6 +10,7 @@ import { createSubtitleToken, verifySubtitleToken } from './subtitle-token.mjs';
 import { safeArchiveEntry, safeSubtitleName, validateSubtitlePayload } from './subtitle-files.mjs';
 import { YifyDirectProvider } from './yify-direct.mjs';
 import { JsonTrendingStore, TrendingMovies, createSeerrFetcher, createYtsPopularFetcher } from './trending-movies.mjs';
+import { TvProviderError, YtsOfficialTvProvider } from './yts-official-tv.mjs';
 
 const registry = createServiceRegistry({
   qbittorrent: { url: process.env.QBITTORRENT_URL ?? 'http://qbittorrent:8080' },
@@ -19,6 +20,11 @@ const registry = createServiceRegistry({
   bazarr: { url: process.env.BAZARR_URL ?? 'http://bazarr:6767' },
   jellyfin: { url: process.env.JELLYFIN_URL ?? 'http://jellyfin:8096' },
   seerr: { url: process.env.SEERR_URL ?? 'http://seerr:5055' },
+});
+
+const tvProvider = process.env.YTS_OFFICIAL_TV_ENABLED === 'false' ? null : new YtsOfficialTvProvider({
+  baseUrl: process.env.YTS_OFFICIAL_TV_URL ?? 'https://en.yts-official.com/',
+  secret: process.env.TV_DOWNLOAD_TOKEN_SECRET ?? 'local-development-change-me',
 });
 
 const media = new MediaClients({
@@ -34,6 +40,7 @@ const media = new MediaClients({
   jellyfinUrl: registry.jellyfin.url,
   jellyfinApiKey: process.env.JELLYFIN_API_KEY,
   libraryRoot: process.env.MOVIES_ROOT ?? '/data/library/movies',
+  tvProvider,
 });
 
 const subtitleTokenSecret = process.env.SUBTITLE_TOKEN_SECRET ?? 'local-development-change-me';
@@ -194,5 +201,10 @@ async function route(req, res) {
 }
 
 http.createServer((req, res) => route(req, res).catch(error => {
+  if (error instanceof TvProviderError || ['invalid_download_token', 'download_client_rejected'].includes(error.code ?? error.message)) {
+    const code = error.code ?? error.message;
+    const status = code === 'yts_tv_release_unavailable' ? 404 : code === 'invalid_download_token' ? 400 : 502;
+    return send(res, status, { error: code });
+  }
   send(res, 502, { error: 'upstream_failed', message: error.message });
 })).listen(Number(process.env.PORT ?? 3000), '0.0.0.0');

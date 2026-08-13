@@ -167,50 +167,62 @@ test('searches and normalizes Sonarr series by TVDB id', async () => {
   assert.deepEqual(await media.searchSeries('batman'), [{ mediaType: 'series', tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', poster: 'poster.jpg', inLibrary: false, seasons: [{ seasonNumber: 1 }] }]);
 });
 
-test('returns episodes and only exact season packs from Sonarr releases', async () => {
-  const media = new MediaClients({});
-  media.ensureSeries = async () => ({ id: 7, tvdbId: 123 });
+test('returns episodes and searches YTS Official with exact Sonarr scope metadata', async () => {
+  const searches = [];
+  const media = new MediaClients({ tvProvider: { search: async scope => { searches.push(scope); return [{ downloadToken: 'token' }]; } } });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
   media.arr = async (_service, requestPath) => {
     if (requestPath === '/episode?seriesId=7') return [{ id: 91, seasonNumber: 1, episodeNumber: 2, title: 'Two', hasFile: false }];
-    if (requestPath === '/release?seriesId=7&seasonNumber=1') return [
-      { guid: 'pack', indexerId: 2, title: 'Show S01 1080p', seasonNumber: 1, fullSeason: true, size: 100 },
-      { guid: 'episode', indexerId: 2, title: 'Show S01E02 1080p', seasonNumber: 1, fullSeason: false, size: 10 },
-    ];
+    if (requestPath === '/episode/91') return { id: 91, seasonNumber: 1, episodeNumber: 2 };
     throw new Error(requestPath);
   };
   assert.equal((await media.seriesEpisodes(123))[0].episodeId, 91);
-  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
-  assert.deepEqual(releases.map(item => item.guid), ['pack']);
-});
-
-test('monitors only the selected episode before downloading its Sonarr release', async () => {
-  const media = new MediaClients({});
-  media.ensureSeries = async () => ({ id: 7 });
-  const sent = [];
-  media.arr = async (_service, requestPath, options) => {
-    if (requestPath === '/episode/91' && !options) return { id: 91, seriesId: 7, monitored: false };
-    sent.push({ requestPath, method: options.method, body: JSON.parse(options.body) });
-    return {};
-  };
-  await media.downloadSeriesRelease(123, { guid: 'g', indexerId: 4, episodeId: 91 });
-  assert.deepEqual(sent, [
-    { requestPath: '/episode/91', method: 'PUT', body: { id: 91, seriesId: 7, monitored: true } },
-    { requestPath: '/release', method: 'POST', body: { guid: 'g', indexerId: 4 } },
+  await media.seriesReleases(123, { seasonNumber: 1 });
+  await media.seriesReleases(123, { episodeId: 91 });
+  assert.deepEqual(searches, [
+    { tvdbId: 123, title: 'Show', year: 2024, seasonNumber: 1 },
+    { tvdbId: 123, title: 'Show', year: 2024, seasonNumber: 1, episodeNumber: 2 },
   ]);
 });
 
-test('monitors only the selected season before downloading its Sonarr pack', async () => {
-  const media = new MediaClients({});
-  media.ensureSeries = async () => ({ id: 7, seasons: [{ seasonNumber: 1, monitored: false }, { seasonNumber: 2, monitored: false }] });
+test('monitors only the selected episode then adds its verified magnet to qBittorrent', async () => {
+  const resolved = [];
+  const media = new MediaClients({ tvProvider: { resolveToken: (token, scope) => { resolved.push({ token, scope }); return { magnetUrl: 'magnet:?xt=urn:btih:' + 'A'.repeat(40), infoHash: 'a'.repeat(40), title: 'Show S01E02' }; } } });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123 });
   const sent = [];
   media.arr = async (_service, requestPath, options) => {
+    if (requestPath === '/episode/91' && !options) return { id: 91, seriesId: 7, seasonNumber: 1, episodeNumber: 2, monitored: false };
     sent.push({ requestPath, method: options.method, body: JSON.parse(options.body) });
     return {};
   };
-  await media.downloadSeriesRelease(123, { guid: 'pack', indexerId: 4, seasonNumber: 2 });
-  assert.equal(sent[0].requestPath, '/series/7');
-  assert.deepEqual(sent[0].body.seasons, [{ seasonNumber: 1, monitored: false }, { seasonNumber: 2, monitored: true }]);
-  assert.deepEqual(sent[1], { requestPath: '/release', method: 'POST', body: { guid: 'pack', indexerId: 4 } });
+  const qbit = [];
+  media.qbit = async (requestPath, options) => {
+    if (requestPath === '/torrents/info') return [];
+    qbit.push({ requestPath, body: Object.fromEntries(options.body) });
+    return null;
+  };
+  const result = await media.downloadSeriesRelease(123, { downloadToken: 'token', episodeId: 91 });
+  assert.deepEqual(resolved, [{ token: 'token', scope: { tvdbId: 123, seasonNumber: 1, episodeNumber: 2 } }]);
+  assert.deepEqual(sent, [
+    { requestPath: '/episode/91', method: 'PUT', body: { id: 91, seriesId: 7, seasonNumber: 1, episodeNumber: 2, monitored: true } },
+  ]);
+  assert.deepEqual(qbit, [{ requestPath: '/torrents/add', body: { urls: 'magnet:?xt=urn:btih:' + 'A'.repeat(40), category: 'series' } }]);
+  assert.deepEqual(result, { accepted: true, duplicate: false, hash: 'a'.repeat(40) });
+});
+
+test('returns idempotent success without monitoring or adding a duplicate TV torrent', async () => {
+  const media = new MediaClients({ tvProvider: { resolveToken: () => ({ magnetUrl: 'magnet:?xt=urn:btih:' + 'B'.repeat(40), infoHash: 'b'.repeat(40), title: 'Show S02' }) } });
+  media.ensureSeries = async () => ({ id: 7, seasons: [{ seasonNumber: 1, monitored: false }, { seasonNumber: 2, monitored: false }] });
+  const sent = [];
+  media.arr = async (...args) => { sent.push(args); return {}; };
+  media.qbit = async requestPath => requestPath === '/torrents/info' ? [{ hash: 'B'.repeat(40) }] : assert.fail('must not add duplicate');
+  assert.deepEqual(await media.downloadSeriesRelease(123, { downloadToken: 'token', seasonNumber: 2 }), { accepted: true, duplicate: true, hash: 'b'.repeat(40) });
+  assert.equal(sent.length, 0);
+});
+
+test('rejects legacy Sonarr release identifiers for TV downloads', async () => {
+  const media = new MediaClients({ tvProvider: { resolveToken: () => assert.fail('must not resolve') } });
+  await assert.rejects(media.downloadSeriesRelease(123, { guid: 'g', indexerId: 4, episodeId: 91 }), /invalid_download_token/);
 });
 
 test('normalizes the managed Radarr library and matches Jellyfin by path', async t => {
