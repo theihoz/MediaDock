@@ -55,6 +55,15 @@ if (-not $envValues.SUBTITLE_TOKEN_SECRET -or $envValues.SUBTITLE_TOKEN_SECRET -
   else { $lines += "SUBTITLE_TOKEN_SECRET=$secret" }
   [IO.File]::WriteAllLines($EnvPath, $lines, (New-Object Text.UTF8Encoding($false)))
 }
+if (-not $envValues.YTS_OFFICIAL_TV_URL) { Add-Content $EnvPath 'YTS_OFFICIAL_TV_URL=https://en.yts-official.com/' }
+if (-not $envValues.YTS_OFFICIAL_TV_ENABLED) { Add-Content $EnvPath 'YTS_OFFICIAL_TV_ENABLED=true' }
+if (-not $envValues.TV_DOWNLOAD_TOKEN_SECRET -or $envValues.TV_DOWNLOAD_TOKEN_SECRET -eq 'replace-with-a-long-random-token') {
+  $tvSecret = -join ((1..64) | ForEach-Object { '{0:x}' -f (Get-Random -Maximum 16) })
+  $lines = Get-Content $EnvPath
+  if ($lines -match '^TV_DOWNLOAD_TOKEN_SECRET=') { $lines = $lines -replace '^TV_DOWNLOAD_TOKEN_SECRET=.*$', "TV_DOWNLOAD_TOKEN_SECRET=$tvSecret" }
+  else { $lines += "TV_DOWNLOAD_TOKEN_SECRET=$tvSecret" }
+  [IO.File]::WriteAllLines($EnvPath, $lines, (New-Object Text.UTF8Encoding($false)))
+}
 
 # qBittorrent: adopt the temporary first-run password, then configure a stable local account.
 $session = New-Object Microsoft.PowerShell.Commands.WebRequestSession
@@ -147,22 +156,22 @@ if (-not ($existingIndexers | Where-Object name -eq 'YTS')) {
   }
 }
 
-# EZTV supplies series releases to Sonarr. Keep creation idempotent and let
-# Prowlarr application profiles route compatible TV categories to Sonarr.
+# EZTV is retained for rollback but disabled because TV discovery now uses
+# the YTS Official provider directly through the backend.
 $existingEztv = $existingIndexers | Where-Object { $_.name -eq 'EZTV' } | Select-Object -First 1
 if (-not $existingEztv) {
   $indexerSchemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
   $eztv = $indexerSchemas | Where-Object name -eq 'EZTV' | Select-Object -First 1
   if ($eztv) {
     $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
-    Set-Property $eztv name 'EZTV'; Set-Property $eztv enable $true
+    Set-Property $eztv name 'EZTV'; Set-Property $eztv enable $false
     Set-Property $eztv tags @($flareTag.id)
     Set-Property $eztv appProfileId $profiles[0].id
     Set-Field $eztv baseUrl 'https://eztvx.to/'
     Invoke-Json POST "$pBase/indexer" $pHeaders $eztv | Out-Null
   }
-} elseif (-not $existingEztv.enable) {
-  Set-Property $existingEztv enable $true
+} elseif ($existingEztv.enable) {
+  Set-Property $existingEztv enable $false
   Invoke-Json PUT "$pBase/indexer/$($existingEztv.id)" $pHeaders $existingEztv | Out-Null
 }
 
@@ -233,7 +242,7 @@ if (Test-Path $composeEnvPath) {
   if ($composeLines -match '^JELLYFIN_API_KEY=') { $composeLines = $composeLines -replace '^JELLYFIN_API_KEY=.*$', "JELLYFIN_API_KEY=$token" }
   else { $composeLines += "JELLYFIN_API_KEY=$token" }
   $freshEnv = Read-Env
-  foreach ($name in @('YIFY_DIRECT_ENABLED','YIFY_DIRECT_BASE_URL','SUBTITLE_TOKEN_SECRET')) {
+  foreach ($name in @('YIFY_DIRECT_ENABLED','YIFY_DIRECT_BASE_URL','SUBTITLE_TOKEN_SECRET','YTS_OFFICIAL_TV_URL','YTS_OFFICIAL_TV_ENABLED','TV_DOWNLOAD_TOKEN_SECRET')) {
     $value = $freshEnv[$name]
     if ($composeLines -match "^$name=") { $composeLines = $composeLines -replace "^$name=.*$", "$name=$value" }
     else { $composeLines += "$name=$value" }

@@ -147,6 +147,9 @@ services:
       SEERR_CONFIG: /service-config/seerr/settings.json
       TRENDING_CACHE: /data/cache/trending.json
       YTS_MOVIE_API_URL: ${YTS_MOVIE_API_URL:-https://movies-api.accel.li}
+      YTS_OFFICIAL_TV_URL: ${YTS_OFFICIAL_TV_URL:-https://en.yts-official.com/}
+      YTS_OFFICIAL_TV_ENABLED: ${YTS_OFFICIAL_TV_ENABLED:-true}
+      TV_DOWNLOAD_TOKEN_SECRET: ${TV_DOWNLOAD_TOKEN_SECRET}
       RADARR_CONFIG: /service-config/radarr.xml
       SONARR_CONFIG: /service-config/sonarr.xml
       BAZARR_CONFIG: /service-config/bazarr.yaml

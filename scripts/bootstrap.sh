@@ -37,6 +37,8 @@ grep -q '^YIFY_DIRECT_ENABLED=' "$ENV_FILE" || printf 'YIFY_DIRECT_ENABLED=false
 grep -q '^YIFY_DIRECT_BASE_URL=' "$ENV_FILE" || printf 'YIFY_DIRECT_BASE_URL=\n' >> "$ENV_FILE"
 if ! grep -q '^SUBTITLE_TOKEN_SECRET=' "$ENV_FILE"; then printf 'SUBTITLE_TOKEN_SECRET=%s\n' "$(secret)" >> "$ENV_FILE"; fi
 if grep -q '^SUBTITLE_TOKEN_SECRET=replace-with-a-long-random-token$' "$ENV_FILE"; then sed -i "s/^SUBTITLE_TOKEN_SECRET=.*/SUBTITLE_TOKEN_SECRET=$(secret)/" "$ENV_FILE"; fi
+if ! grep -q '^TV_DOWNLOAD_TOKEN_SECRET=' "$ENV_FILE"; then printf 'TV_DOWNLOAD_TOKEN_SECRET=%s\n' "$(secret)" >> "$ENV_FILE"; fi
+if grep -q '^TV_DOWNLOAD_TOKEN_SECRET=replace-with-a-long-random-token$' "$ENV_FILE"; then sed -i "s/^TV_DOWNLOAD_TOKEN_SECRET=.*/TV_DOWNLOAD_TOKEN_SECRET=$(secret)/" "$ENV_FILE"; fi
 
 set -a; source "$ENV_FILE"; set +a
 MEDIA_ROOT="${MEDIA_ROOT:-$MEDIA_ROOT_DEFAULT}"

@@ -8,17 +8,25 @@ test('bootstrap disables Internet Archive and leaves YTS enabled', () => {
   assert.match(script, /Where-Object name -eq 'YTS'[\s\S]+Set-Property \$yts enable \$true/);
 });
 
-test('bootstrap creates one enabled EZTV series indexer idempotently', () => {
+test('bootstrap keeps EZTV but disables it idempotently', () => {
   const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
   assert.match(script, /Where-Object name -eq 'EZTV'/);
   assert.match(script, /Where-Object \{ \$_\.name -eq 'EZTV' \} \| Select-Object -First 1/);
   assert.match(script, /Set-Property \$eztv name 'EZTV'/);
-  assert.match(script, /Set-Property \$eztv enable \$true/);
+  assert.match(script, /Set-Property \$eztv enable \$false/);
   assert.match(script, /Set-Field \$eztv baseUrl 'https:\/\/eztvx\.to\/'/);
   assert.match(script, /implementation -eq 'FlareSolverr'/);
   assert.match(script, /Set-Field \$proxy host 'http:\/\/flaresolverr:8191\/'/);
   assert.match(script, /Set-Property \$eztv tags @\(\$flareTag\.id\)/);
   assert.match(script, /ApplicationIndexerSync/);
+});
+
+test('compose exposes YTS Official TV settings only to the API and keeps manual restart policy', () => {
+  const compose = fs.readFileSync(new URL('../../docker-compose.yml', import.meta.url), 'utf8');
+  assert.match(compose, /api:[\s\S]+YTS_OFFICIAL_TV_URL: \$\{YTS_OFFICIAL_TV_URL:-https:\/\/en\.yts-official\.com\/\}/);
+  assert.match(compose, /api:[\s\S]+YTS_OFFICIAL_TV_ENABLED: \$\{YTS_OFFICIAL_TV_ENABLED:-true\}/);
+  assert.match(compose, /api:[\s\S]+TV_DOWNLOAD_TOKEN_SECRET: \$\{TV_DOWNLOAD_TOKEN_SECRET\}/);
+  assert.match(compose, /api:\s*\n\s+build: \.\/backend\s*\n\s+restart: "no"/);
 });
 
 test('bootstrap seeds the protected trending cache from YTS when missing', () => {
