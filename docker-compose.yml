@@ -92,6 +92,8 @@ services:
     volumes:
       - "${MEDIA_ROOT}/config/bazarr:/config"
       - "${MEDIA_ROOT}/library:/data/library"
+      - "${MEDIA_ROOT}/backups:/backups"
+      - "./scripts/bazarr_profile.py:/opt/media-control/bazarr_profile.py:ro"
     ports: ["6767:6767"]
 
   jellyfin:

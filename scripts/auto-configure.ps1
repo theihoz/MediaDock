@@ -16,8 +16,7 @@ function Set-Field($schema, $name, $value) {
   }
 }
 function Set-Property($object, $name, $value) {
-  if ($object.PSObject.Properties.Name -contains $name) { $object.$name = $value }
-  else { $object | Add-Member -NotePropertyName $name -NotePropertyValue $value }
+  $object | Add-Member -Force -NotePropertyName $name -NotePropertyValue $value
 }
 function Invoke-Json($method, $uri, $headers, $body=$null) {
   $args = @{ Method=$method; Uri=$uri; Headers=$headers; ContentType='application/json' }
@@ -211,11 +210,12 @@ function Ensure-JellyfinConnect($port, $key) {
   $headers = @{'X-Api-Key'=$key}
   $existingNotifications = @(Invoke-Json GET "$base/notification" $headers)
   $existing = $existingNotifications | Where-Object { $_.name -eq 'Media Jellyfin' } | Select-Object -First 1
-  if ($null -ne $existing) { return }
-  $schemas = Invoke-Json GET "$base/notification/schema" $headers
-  $schema = $schemas | Where-Object implementation -eq 'MediaBrowser' | Select-Object -First 1
-  if (-not $schema) { throw "MediaBrowser notification schema not found on port $port" }
-  $target = $schema
+  if ($null -ne $existing) { $target = $existing }
+  else {
+    $schemas = Invoke-Json GET "$base/notification/schema" $headers
+    $target = $schemas | Where-Object implementation -eq 'MediaBrowser' | Select-Object -First 1
+    if (-not $target) { throw "MediaBrowser notification schema not found on port $port" }
+  }
   Set-Property $target name 'Media Jellyfin'
   if ($target.PSObject.Properties.Name -contains 'enable') { $target.enable = $true }
   foreach ($eventName in @('onDownload','onUpgrade','onRename','onMovieDelete','onSeriesDelete','onEpisodeFileDelete')) {
@@ -223,7 +223,9 @@ function Ensure-JellyfinConnect($port, $key) {
   }
   Set-Field $target host 'jellyfin'; Set-Field $target port 8096; Set-Field $target useSsl $false
   Set-Field $target apiKey $token; Set-Field $target updateLibrary $true
-  Invoke-Json POST "$base/notification" $headers $target | Out-Null
+  if ($null -ne $existing) { Invoke-Json PUT "$base/notification/$($target.id)" $headers $target | Out-Null }
+  else { Invoke-Json POST "$base/notification" $headers $target | Out-Null }
+  Write-Output "Jellyfin Connect ready on port $port"
 }
 Write-Output 'Configuring Radarr Jellyfin Connect...'
 Ensure-JellyfinConnect 7878 $radarrKey
@@ -249,7 +251,8 @@ if (Test-Path $composeEnvPath) {
   [IO.File]::WriteAllLines($composeEnvPath, $composeLines, (New-Object Text.UTF8Encoding($false)))
 }
 
-# Bazarr: connect Arr services and enable free, credential-less movie providers.
+# Bazarr: connect Arr, then reconcile its default automatic language profile
+# while the SQLite database is closed cleanly.
 $bazarrPath = 'D:\Media\config\bazarr\config\config.yaml'
 $section = ''
 $skipProviderLines = $false
@@ -270,7 +273,30 @@ foreach ($line in [IO.File]::ReadAllLines($bazarrPath)) {
   $bazarrLines.Add($line)
 }
 [IO.File]::WriteAllLines($bazarrPath, $bazarrLines, (New-Object Text.UTF8Encoding($false)))
-docker compose --env-file (Join-Path $ProjectDir '.env.compose') restart bazarr | Out-Null
+$composeEnv = Join-Path $ProjectDir '.env.compose'
+docker compose --env-file $composeEnv stop bazarr | Out-Null
+$profileOutput = docker compose --env-file $composeEnv run --rm --no-deps --entrypoint python3 bazarr `
+  /opt/media-control/bazarr_profile.py `
+  --db /config/db/bazarr.db `
+  --config /config/config/config.yaml `
+  --backup-dir /backups/bazarr `
+  --timestamp (Get-Date -Format 'yyyyMMdd-HHmmss')
+if ($LASTEXITCODE -ne 0) { throw 'Bazarr profile reconciliation failed' }
+$profileResult = $profileOutput | Select-Object -Last 1 | ConvertFrom-Json
+Write-Output "Bazarr profile ready: movies=$($profileResult.moviesUpdated), series=$($profileResult.seriesUpdated)"
+docker compose --env-file $composeEnv up -d bazarr | Out-Null
+for ($attempt = 0; $attempt -lt 30; $attempt++) {
+  try { Invoke-RestMethod http://localhost:6767/api/system/ping -TimeoutSec 2 | Out-Null; break } catch { Start-Sleep -Seconds 1 }
+}
+$bazarrKey = ((Get-Content $bazarrPath | Select-String '^  apikey:\s*(\S+)' | Select-Object -First 1).Matches.Groups[1].Value)
+$bHeaders = @{'X-Api-Key'=$bazarrKey}
+try {
+  $movies = @(Invoke-Json GET 'http://localhost:6767/api/movies?start=0&length=-1' $bHeaders).data
+  foreach ($movie in $movies) { Invoke-RestMethod "http://localhost:6767/api/movies?radarrid=$($movie.radarrId)&action=sync" -Method Patch -Headers $bHeaders | Out-Null; Invoke-RestMethod "http://localhost:6767/api/movies?radarrid=$($movie.radarrId)&action=search-missing" -Method Patch -Headers $bHeaders | Out-Null }
+  $series = @(Invoke-Json GET 'http://localhost:6767/api/series?start=0&length=-1' $bHeaders).data
+  foreach ($show in $series) { Invoke-RestMethod "http://localhost:6767/api/series?seriesid=$($show.sonarrSeriesId)&action=sync" -Method Patch -Headers $bHeaders | Out-Null; Invoke-RestMethod "http://localhost:6767/api/series?seriesid=$($show.sonarrSeriesId)&action=search-missing" -Method Patch -Headers $bHeaders | Out-Null }
+  Write-Output "Bazarr missing subtitle search queued: movies=$($movies.Count), series=$($series.Count)"
+} catch { Write-Warning 'Bazarr provider unavailable; automatic retry remains scheduled.' }
 docker compose --env-file (Join-Path $ProjectDir '.env.compose') up -d --force-recreate api | Out-Null
 
 Write-Output 'Configured qBittorrent, Radarr, Sonarr, Prowlarr (YTS), Bazarr and Jellyfin.'

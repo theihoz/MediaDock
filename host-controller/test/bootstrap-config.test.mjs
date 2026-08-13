@@ -8,6 +8,11 @@ test('bootstrap disables Internet Archive and leaves YTS enabled', () => {
   assert.match(script, /Where-Object name -eq 'YTS'[\s\S]+Set-Property \$yts enable \$true/);
 });
 
+test('bootstrap updates existing PowerShell object properties without duplicate Add-Member failures', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /Add-Member -Force -NotePropertyName \$name -NotePropertyValue \$value/);
+});
+
 test('bootstrap enables EZTV idempotently as the TV fallback', () => {
   const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
   assert.match(script, /Where-Object name -eq 'EZTV'/);
@@ -47,10 +52,26 @@ test('bootstrap configures Arr to notify Jellyfin and refreshes the library', ()
   assert.match(script, /implementation -eq 'MediaBrowser'/);
   assert.match(script, /Set-Field \$target host 'jellyfin'/);
   assert.match(script, /Set-Field \$target updateLibrary \$true/);
+  assert.match(script, /if \(\$null -ne \$existing\)[\s\S]+Invoke-Json PUT "\$base\/notification\/\$\(\$target\.id\)"/);
+  assert.doesNotMatch(script, /if \(\$null -ne \$existing\) \{ return \}/);
   assert.match(script, /Library\/Refresh/);
   assert.match(script, /EnableRemoteAccess \$true/);
   assert.match(script, /EnableUPnP \$false/);
   assert.match(script, /BaseUrl ''/);
+});
+
+test('bootstrap safely reconciles the automatic Vietnamese-English Bazarr profile', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  const compose = fs.readFileSync(new URL('../../docker-compose.yml', import.meta.url), 'utf8');
+  assert.match(script, /docker compose[\s\S]+stop bazarr/);
+  assert.match(script, /docker compose[\s\S]+run --rm --no-deps --entrypoint python3 bazarr/);
+  assert.doesNotMatch(script, /Get-Command python|codex-runtimes/);
+  assert.match(compose, /bazarr:[\s\S]+bazarr_profile\.py:\/opt\/media-control\/bazarr_profile\.py:ro/);
+  assert.match(compose, /bazarr:[\s\S]+\/backups/);
+  assert.match(script, /docker compose[\s\S]+up -d bazarr/);
+  assert.match(script, /action=sync/);
+  assert.match(script, /action=search-missing/);
+  assert.match(script, /Bazarr profile ready/);
 });
 
 test('Samsung LAN setup publishes discovery and creates private firewall rules', () => {
