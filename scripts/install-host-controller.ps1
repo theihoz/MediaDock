@@ -17,11 +17,12 @@ $ConfigPath = Join-Path $ConfigDir 'config.json'
 $TempPath = "$ConfigPath.tmp"
 New-Item -ItemType Directory -Force -Path $ConfigDir | Out-Null
 
-@{
+$configJson = @{
   gateway = 'http://localhost:3000'
   controller = 'http://127.0.0.1:3210'
   token = $token
   controllerLauncher = $Launcher
-} | ConvertTo-Json | Set-Content -LiteralPath $TempPath -Encoding utf8
+} | ConvertTo-Json
+[IO.File]::WriteAllText($TempPath, $configJson, (New-Object Text.UTF8Encoding($false)))
 Move-Item -LiteralPath $TempPath -Destination $ConfigPath -Force
 Write-Output "Media Control local configuration installed at $ConfigPath"

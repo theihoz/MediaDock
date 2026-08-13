@@ -24,16 +24,20 @@ class MediaControlApp extends StatelessWidget {
 class LocalConfig {
   const LocalConfig({this.gateway = 'http://localhost:3000', this.controller = 'http://127.0.0.1:3210', this.token = 'media-control-local', this.controllerLauncher = ''});
   final String gateway, controller, token, controllerLauncher;
+  static LocalConfig parse(String text) {
+    final normalized = text.startsWith('\uFEFF') ? text.substring(1) : text;
+    final data = jsonDecode(normalized);
+    return LocalConfig(
+      gateway: data['gateway'] ?? 'http://localhost:3000',
+      controller: data['controller'] ?? 'http://127.0.0.1:3210',
+      token: data['token'] ?? 'media-control-local',
+      controllerLauncher: data['controllerLauncher'] ?? '',
+    );
+  }
   static LocalConfig load() {
     try {
       final base = Platform.environment['LOCALAPPDATA'];
-      final data = jsonDecode(File('$base\\MediaControl\\config.json').readAsStringSync());
-      return LocalConfig(
-        gateway: data['gateway'] ?? 'http://localhost:3000',
-        controller: data['controller'] ?? 'http://127.0.0.1:3210',
-        token: data['token'] ?? 'media-control-local',
-        controllerLauncher: data['controllerLauncher'] ?? '',
-      );
+      return parse(File('$base\\MediaControl\\config.json').readAsStringSync());
     } catch (_) {
       return const LocalConfig();
     }
@@ -91,11 +95,13 @@ class _MediaShellState extends State<MediaShell> {
       launch: () async {
         final launcher = api.config.controllerLauncher;
         if (launcher.isEmpty) throw StateError('controller launcher is not configured');
-        await Process.start(
+        final process = await Process.start(
           'powershell.exe',
           ['-NoProfile', '-WindowStyle', 'Hidden', '-ExecutionPolicy', 'Bypass', '-File', launcher],
-          mode: ProcessStartMode.detached,
+          mode: ProcessStartMode.normal,
         );
+        unawaited(process.stdout.drain<void>());
+        unawaited(process.stderr.drain<void>());
       },
     );
     recoverController();

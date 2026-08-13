@@ -12,13 +12,31 @@ chmod +x scripts/*.sh
 ./scripts/bootstrap.sh
 ```
 
-The bootstrap creates `/mnt/d/Media`, copies `.env.example` to private `.env`, generates the two database secrets, creates media folders, then starts the stack. Do not commit `.env`.
+The bootstrap creates `/mnt/d/Media`, copies `.env.example` to private `.env`, generates the two database secrets, creates media folders, temporarily starts the stack for configuration, and stops it before returning. Do not commit `.env`.
 
 If Docker Desktop WSL integration is disabled, the bootstrap automatically uses Docker Desktop's Windows CLI and converts `/mnt/d/Media` to `D:/Media` for bind mounts.
 
 The bootstrap completes the local qBittorrent, Radarr, Sonarr, Prowlarr, Bazarr and Jellyfin setup with `admin / media1234`. Prowlarr configures Internet Archive and the explicitly requested YTS indexer (`yts.gg` with `movies-api.accel.li`). Provider credentials and indexers must only be configured for sources you are authorized to use.
 
-Media Control includes server power controls, per-service actions, movie/release search, download queue, manual subtitle selection and a Jellyfin library launcher. The host controller listens only on `127.0.0.1:3210` and starts with Windows.
+Media Control includes server power controls, per-service actions, movie/release search, download queue, manual subtitle selection and a Jellyfin library launcher. The host controller listens only on `127.0.0.1:3210`; the app starts it on demand without starting the media stack.
+
+## Manual startup and cold boot
+
+All media containers use the Docker restart policy `no`. Restarting Windows or
+Docker Desktop therefore leaves the media server off. Start it only with the
+main **Bật server** button in Media Control or by manually starting containers
+in Docker Desktop.
+
+Media Control may start its small loopback host-controller when the app opens.
+That controller does not start Docker Desktop or any media container; it only
+makes the power buttons available. Its private configuration is stored at
+`%LOCALAPPDATA%\MediaControl\config.json`. If controller recovery fails, the app
+shows a Vietnamese retry screen instead of a raw socket exception.
+
+The **Tìm phim** page loads **Đang thịnh hành** automatically. Searching still
+uses the existing title lookup, and clearing the search restores trending
+movies. Trending metadata comes from the local Seerr integration and the
+backend keeps only a normalized last-good cache under the media cache folder.
 
 ## Flutter Windows client
 

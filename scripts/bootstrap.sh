@@ -61,5 +61,5 @@ cd "$ROOT_DIR"
 "$ROOT_DIR/scripts/configure-services.sh" || true
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/install-host-controller.ps1")" || true
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/auto-configure.ps1")" || true
-echo "\nStack started. Setup wizards: Jellyfin http://localhost:8096 | Seerr http://localhost:5055 | qBittorrent http://localhost:8080"
-echo "Gateway health: http://localhost:3000/health"
+"${DOCKER[@]}" compose --env-file "$COMPOSE_ENV_FILE" stop
+echo "Setup complete. Media stack is stopped. Start it from Media Control or Docker Desktop."
