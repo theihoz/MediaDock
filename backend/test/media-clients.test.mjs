@@ -149,6 +149,40 @@ test('matches Arr import history by download hash without relying on its broken 
   assert.doesNotMatch(requestPath, /downloadId=/);
 });
 
+test('searches and normalizes Sonarr series by TVDB id', async () => {
+  const media = new MediaClients({});
+  media.arr = async (_service, requestPath) => {
+    assert.equal(requestPath, '/series/lookup?term=batman');
+    return [{ tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', remotePoster: 'poster.jpg', seasons: [{ seasonNumber: 1 }] }];
+  };
+  assert.deepEqual(await media.searchSeries('batman'), [{ mediaType: 'series', tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', poster: 'poster.jpg', inLibrary: false, seasons: [{ seasonNumber: 1 }] }]);
+});
+
+test('returns episodes and only exact season packs from Sonarr releases', async () => {
+  const media = new MediaClients({});
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123 });
+  media.arr = async (_service, requestPath) => {
+    if (requestPath === '/episode?seriesId=7') return [{ id: 91, seasonNumber: 1, episodeNumber: 2, title: 'Two', hasFile: false }];
+    if (requestPath === '/release?seriesId=7&seasonNumber=1') return [
+      { guid: 'pack', indexerId: 2, title: 'Show S01 1080p', seasonNumber: 1, fullSeason: true, size: 100 },
+      { guid: 'episode', indexerId: 2, title: 'Show S01E02 1080p', seasonNumber: 1, fullSeason: false, size: 10 },
+    ];
+    throw new Error(requestPath);
+  };
+  assert.equal((await media.seriesEpisodes(123))[0].episodeId, 91);
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.guid), ['pack']);
+});
+
+test('downloads only the explicitly selected Sonarr release', async () => {
+  const media = new MediaClients({});
+  media.ensureSeries = async () => ({ id: 7 });
+  let sent;
+  media.arr = async (_service, requestPath, options) => { sent = { requestPath, body: JSON.parse(options.body) }; return {}; };
+  await media.downloadSeriesRelease(123, { guid: 'g', indexerId: 4, episodeId: 91 });
+  assert.deepEqual(sent, { requestPath: '/release', body: { guid: 'g', indexerId: 4 } });
+});
+
 test('normalizes the managed Radarr library and matches Jellyfin by path', async t => {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'media-library-'));
   t.after(() => fs.rm(root, { recursive: true, force: true }));

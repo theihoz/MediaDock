@@ -8,6 +8,26 @@ test('bootstrap disables Internet Archive and leaves YTS enabled', () => {
   assert.match(script, /Where-Object name -eq 'YTS'[\s\S]+Set-Property \$yts enable \$true/);
 });
 
+test('bootstrap creates one enabled EZTV series indexer idempotently', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /Where-Object name -eq 'EZTV'/);
+  assert.match(script, /Where-Object \{ \$_\.name -eq 'EZTV' \} \| Select-Object -First 1/);
+  assert.match(script, /Set-Property \$eztv name 'EZTV'/);
+  assert.match(script, /Set-Property \$eztv enable \$true/);
+  assert.match(script, /Set-Field \$eztv baseUrl 'https:\/\/eztvx\.to\/'/);
+  assert.match(script, /implementation -eq 'FlareSolverr'/);
+  assert.match(script, /Set-Field \$proxy host 'http:\/\/flaresolverr:8191\/'/);
+  assert.match(script, /Set-Property \$eztv tags @\(\$flareTag\.id\)/);
+  assert.match(script, /ApplicationIndexerSync/);
+});
+
+test('bootstrap seeds the protected trending cache from YTS when missing', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /trending\.json/);
+  assert.match(script, /list_movies\.json\?limit=40&sort_by=download_count/);
+  assert.match(script, /if \(-not \(Test-Path -LiteralPath \$trendingCache\)\)/);
+});
+
 test('compose bounds Docker stdout logs for every service group', () => {
   const compose = fs.readFileSync(new URL('../../docker-compose.yml', import.meta.url), 'utf8');
   assert.match(compose, /x-logging: &logging[\s\S]+driver: local[\s\S]+max-size: "10m"[\s\S]+max-file: "2"/);

@@ -165,6 +165,59 @@ class LibraryApi extends Api {
   }
 }
 
+class SeriesApi extends Api {
+  SeriesApi() : super(const LocalConfig());
+  Object? downloadBody;
+  @override
+  Future<dynamic> gateway(String path,
+      {String method = 'GET', Object? body}) async {
+    if (path.startsWith('/v1/series/search')) {
+      return [
+        {
+          'mediaType': 'series',
+          'tvdbId': 123,
+          'title': 'Test Show',
+          'year': 2024,
+          'overview': 'Overview',
+          'poster': null,
+          'seasons': [
+            {'seasonNumber': 1}
+          ]
+        }
+      ];
+    }
+    if (path == '/v1/series/123/episodes') {
+      return [
+        {
+          'episodeId': 91,
+          'seasonNumber': 1,
+          'episodeNumber': 2,
+          'title': 'Episode Two',
+          'hasFile': false
+        }
+      ];
+    }
+    if (path == '/v1/series/123/releases?seasonNumber=1') {
+      return [
+        {
+          'guid': 'pack',
+          'indexerId': 2,
+          'title': 'Test Show S01 1080p',
+          'quality': 'WEBDL-1080p',
+          'codec': 'H.264',
+          'size': 1000,
+          'seeders': 5
+        }
+      ];
+    }
+    if (path == '/v1/series/123/download' && method == 'POST') {
+      downloadBody = body;
+      return {};
+    }
+    throw StateError('Unexpected request: $method $path');
+  }
+}
+
 void main() {
   testWidgets('shows readable Vietnamese media navigation', (tester) async {
     await tester.pumpWidget(MediaControlApp(
@@ -176,7 +229,7 @@ void main() {
 
     expect(find.text('Media Control'), findsOneWidget);
     expect(find.text('Tổng quan'), findsWidgets);
-    expect(find.text('Tìm phim'), findsOneWidget);
+    expect(find.text('Khám phá'), findsOneWidget);
     expect(find.text('Downloads'), findsOneWidget);
     expect(find.text('Phụ đề'), findsOneWidget);
     expect(find.text('Thư viện'), findsOneWidget);
@@ -285,8 +338,7 @@ void main() {
         .pumpWidget(MaterialApp(home: Scaffold(body: SettingsPage(api: api))));
     await tester.pumpAndSettle();
 
-    await tester.scrollUntilVisible(
-        find.text('Xóa cache & log'), 250,
+    await tester.scrollUntilVisible(find.text('Xóa cache & log'), 250,
         scrollable: find.byType(Scrollable).last);
     await tester.tap(find.text('Xóa cache & log'));
     await tester.pumpAndSettle();
@@ -305,8 +357,8 @@ void main() {
   testWidgets('library deletion requires an uninterrupted three second hold',
       (tester) async {
     final api = LibraryApi();
-    await tester.pumpWidget(
-        MaterialApp(home: Scaffold(body: LibraryPage(api: api))));
+    await tester
+        .pumpWidget(MaterialApp(home: Scaffold(body: LibraryPage(api: api))));
     await tester.pumpAndSettle();
     await tester.tap(find.text('The Batman (2022)'));
     await tester.pumpAndSettle();
@@ -323,5 +375,25 @@ void main() {
     await fullHold.up();
     await tester.pumpAndSettle();
     expect(api.deleteCalls, 1);
+  });
+
+  testWidgets('discovers a TV show and downloads an explicit season pack',
+      (tester) async {
+    final api = SeriesApi();
+    await tester
+        .pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
+    await tester.tap(find.text('TV Show'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Test');
+    await tester.tap(find.text('Tìm'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Test Show (2024)'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Tìm season pack'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Tải'));
+    await tester.pumpAndSettle();
+    expect(
+        api.downloadBody, {'guid': 'pack', 'indexerId': 2, 'seasonNumber': 1});
   });
 }

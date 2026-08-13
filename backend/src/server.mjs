@@ -9,7 +9,7 @@ import { filterSubtitleResults, mergeSubtitleResults, normalizeSubtitle, shouldU
 import { createSubtitleToken, verifySubtitleToken } from './subtitle-token.mjs';
 import { safeArchiveEntry, safeSubtitleName, validateSubtitlePayload } from './subtitle-files.mjs';
 import { YifyDirectProvider } from './yify-direct.mjs';
-import { JsonTrendingStore, TrendingMovies, createSeerrFetcher } from './trending-movies.mjs';
+import { JsonTrendingStore, TrendingMovies, createSeerrFetcher, createYtsPopularFetcher } from './trending-movies.mjs';
 
 const registry = createServiceRegistry({
   qbittorrent: { url: process.env.QBITTORRENT_URL ?? 'http://qbittorrent:8080' },
@@ -47,6 +47,7 @@ const trending = new TrendingMovies({
     configPath: process.env.SEERR_CONFIG ?? '/service-config/seerr/settings.json',
   }),
   store: new JsonTrendingStore(process.env.TRENDING_CACHE ?? '/data/cache/trending.json'),
+  fetchFallback: createYtsPopularFetcher({ baseUrl: process.env.YTS_MOVIE_API_URL ?? 'https://movies-api.accel.li' }),
 });
 const execFileAsync = promisify(execFile);
 
@@ -103,6 +104,23 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/v1/services') return send(res, 200, Object.values(registry).map(publicService));
   if (req.method === 'GET' && url.pathname === '/v1/movies/trending') return send(res, 200, await trending.get());
   if (req.method === 'GET' && url.pathname === '/v1/movies/search') return send(res, 200, await media.searchMovies(url.searchParams.get('q') ?? ''));
+  if (req.method === 'GET' && url.pathname === '/v1/series/search') return send(res, 200, await media.searchSeries(url.searchParams.get('q') ?? ''));
+
+  let seriesMatch = url.pathname.match(/^\/v1\/series\/(\d+)$/);
+  if (req.method === 'GET' && seriesMatch) return send(res, 200, media.normalizeSeries(await media.series(seriesMatch[1])));
+  seriesMatch = url.pathname.match(/^\/v1\/series\/(\d+)\/episodes$/);
+  if (req.method === 'GET' && seriesMatch) return send(res, 200, await media.seriesEpisodes(seriesMatch[1]));
+  seriesMatch = url.pathname.match(/^\/v1\/series\/(\d+)\/releases$/);
+  if (req.method === 'GET' && seriesMatch) {
+    const episodeId = url.searchParams.get('episodeId');
+    const seasonNumber = url.searchParams.get('seasonNumber');
+    if (!episodeId && seasonNumber === null) return send(res, 400, { error: 'series_scope_required' });
+    const releases = await media.seriesReleases(seriesMatch[1], episodeId ? { episodeId: Number(episodeId) } : { seasonNumber: Number(seasonNumber) });
+    if (!episodeId && releases.length === 0) return send(res, 404, { error: 'season_pack_unavailable' });
+    return send(res, 200, releases);
+  }
+  seriesMatch = url.pathname.match(/^\/v1\/series\/(\d+)\/download$/);
+  if (req.method === 'POST' && seriesMatch) return send(res, 202, await media.downloadSeriesRelease(seriesMatch[1], await body(req)));
 
   let match = url.pathname.match(/^\/v1\/movies\/(\d+)$/);
   if (req.method === 'GET' && match) return send(res, 200, await media.movie(match[1]));

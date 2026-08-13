@@ -29,6 +29,21 @@ $envValues = Read-Env
 $user = $envValues.LOCAL_ADMIN_USER; if (-not $user) { $user = 'admin' }
 $password = $envValues.LOCAL_ADMIN_PASSWORD; if (-not $password) { $password = 'media1234' }
 
+# Seed the protected last-good discovery cache without starting any service.
+$trendingCache = 'D:\Media\cache\trending.json'
+if (-not (Test-Path -LiteralPath $trendingCache)) {
+  try {
+    $popular = Invoke-RestMethod 'https://movies-api.accel.li/api/v2/list_movies.json?limit=40&sort_by=download_count' -TimeoutSec 8
+    $cards = @($popular.data.movies | ForEach-Object {
+      @{tmdbId=0;ytsId=[int]$_.id;mediaType='movie';title=$_.title;year=[int]$_.year;overview=$_.summary;poster=$_.medium_cover_image;runtime=$_.runtime;genres=@($_.genres);inLibrary=$false;rating=$_.rating}
+    })
+    if ($cards.Count -gt 0) {
+      New-Item -ItemType Directory -Force -Path (Split-Path $trendingCache -Parent) | Out-Null
+      [IO.File]::WriteAllText($trendingCache, ($cards | ConvertTo-Json -Depth 8 -Compress), (New-Object Text.UTF8Encoding($false)))
+    }
+  } catch { Write-Warning 'Could not seed trending cache; backend will retry when Discover opens.' }
+}
+
 # Direct YIFY lookup is opt-in. Keep the URL fixed in backend configuration;
 # Flutter can request fallback but cannot choose an arbitrary provider host.
 if (-not $envValues.YIFY_DIRECT_ENABLED) { Add-Content $EnvPath 'YIFY_DIRECT_ENABLED=false' }
@@ -97,6 +112,18 @@ foreach ($target in @(@{name='Radarr';url='http://radarr:7878';key=$radarrKey},@
 # Internet Archive is retained when already configured, but disabled because its
 # upstream search frequently times out and blocks Radarr's complete result set.
 $existingIndexers = Invoke-Json GET "$pBase/indexer" $pHeaders
+$tags = @(Invoke-Json GET "$pBase/tag" $pHeaders)
+$flareTag = $tags | Where-Object { $_.label -eq 'flaresolverr' } | Select-Object -First 1
+if (-not $flareTag) { $flareTag = Invoke-Json POST "$pBase/tag" $pHeaders @{label='flaresolverr'} }
+$proxies = @(Invoke-Json GET "$pBase/indexerProxy" $pHeaders)
+$flareProxy = $proxies | Where-Object { $_.name -eq 'Media FlareSolverr' } | Select-Object -First 1
+if (-not $flareProxy) {
+  $proxySchemas = Invoke-Json GET "$pBase/indexerProxy/schema" $pHeaders
+  $proxy = $proxySchemas | Where-Object implementation -eq 'FlareSolverr' | Select-Object -First 1
+  Set-Property $proxy name 'Media FlareSolverr'; Set-Property $proxy tags @($flareTag.id)
+  Set-Field $proxy host 'http://flaresolverr:8191/'
+  Invoke-Json POST "$pBase/indexerProxy" $pHeaders $proxy | Out-Null
+}
 $archive = $existingIndexers | Where-Object name -eq 'Internet Archive' | Select-Object -First 1
 if ($archive -and $archive.enable) {
   Set-Property $archive enable $false
@@ -118,6 +145,25 @@ if (-not ($existingIndexers | Where-Object name -eq 'YTS')) {
     Set-Field $yts 'torrentBaseSettings.appMinimumSeeders' 0
     Invoke-Json POST "$pBase/indexer" $pHeaders $yts | Out-Null
   }
+}
+
+# EZTV supplies series releases to Sonarr. Keep creation idempotent and let
+# Prowlarr application profiles route compatible TV categories to Sonarr.
+$existingEztv = $existingIndexers | Where-Object { $_.name -eq 'EZTV' } | Select-Object -First 1
+if (-not $existingEztv) {
+  $indexerSchemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
+  $eztv = $indexerSchemas | Where-Object name -eq 'EZTV' | Select-Object -First 1
+  if ($eztv) {
+    $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
+    Set-Property $eztv name 'EZTV'; Set-Property $eztv enable $true
+    Set-Property $eztv tags @($flareTag.id)
+    Set-Property $eztv appProfileId $profiles[0].id
+    Set-Field $eztv baseUrl 'https://eztvx.to/'
+    Invoke-Json POST "$pBase/indexer" $pHeaders $eztv | Out-Null
+  }
+} elseif (-not $existingEztv.enable) {
+  Set-Property $existingEztv enable $true
+  Invoke-Json PUT "$pBase/indexer/$($existingEztv.id)" $pHeaders $existingEztv | Out-Null
 }
 
 $appProfiles = Invoke-Json GET "$pBase/appprofile" $pHeaders

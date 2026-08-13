@@ -98,7 +98,7 @@ class _MediaShellState extends State<MediaShell> {
         selectedIcon: Icon(Icons.dashboard),
         label: Text('Tổng quan')),
     NavigationRailDestination(
-        icon: Icon(Icons.search), label: Text('Tìm phim')),
+        icon: Icon(Icons.search), label: Text('Khám phá')),
     NavigationRailDestination(
         icon: Icon(Icons.downloading_outlined),
         selectedIcon: Icon(Icons.downloading),
@@ -163,7 +163,7 @@ class _MediaShellState extends State<MediaShell> {
 
   Widget selectedPage() => switch (selected) {
         0 => OverviewPage(api: api),
-        1 => MovieSearchPage(api: api),
+        1 => DiscoveryPage(api: api),
         2 => DownloadsPage(api: api),
         3 => SubtitlesPage(api: api),
         4 => LibraryPage(api: api),
@@ -331,6 +331,38 @@ class _OverviewPageState extends State<OverviewPage> {
       );
 }
 
+class DiscoveryPage extends StatefulWidget {
+  const DiscoveryPage({super.key, required this.api});
+  final Api api;
+  @override
+  State<DiscoveryPage> createState() => _DiscoveryPageState();
+}
+
+class _DiscoveryPageState extends State<DiscoveryPage> {
+  int tab = 0;
+  @override
+  Widget build(BuildContext context) => Column(children: [
+        Padding(
+            padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+            child: SegmentedButton<int>(
+                segments: const [
+                  ButtonSegment(
+                      value: 0, label: Text('Phim'), icon: Icon(Icons.movie)),
+                  ButtonSegment(
+                      value: 1, label: Text('TV Show'), icon: Icon(Icons.tv))
+                ],
+                selected: {
+                  tab
+                },
+                onSelectionChanged: (value) =>
+                    setState(() => tab = value.first))),
+        Expanded(
+            child: tab == 0
+                ? MovieSearchPage(api: widget.api)
+                : SeriesSearchPage(api: widget.api))
+      ]);
+}
+
 class MovieSearchPage extends StatefulWidget {
   const MovieSearchPage({super.key, required this.api});
   final Api api;
@@ -345,6 +377,7 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
   bool busy = false;
   bool showingSearch = false;
   bool stale = false;
+  String trendingSource = 'unavailable';
   String? error;
   @override
   void initState() {
@@ -365,6 +398,8 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
       setState(() {
         movies = result is List ? result : (result['items'] ?? []);
         stale = result is Map && result['stale'] == true;
+        trendingSource =
+            result is Map ? '${result['source'] ?? 'unavailable'}' : 'seerr';
         releases = [];
       });
     } catch (_) {
@@ -417,8 +452,21 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
         error = null;
         releases = [];
       });
+      var target = movie;
+      if ((movie['tmdbId'] ?? 0) == 0) {
+        final matches = await widget.api.gateway(
+            '/v1/movies/search?q=${Uri.encodeQueryComponent(movie['title'])}');
+        final exact = (matches as List)
+            .where((item) => item['year'] == movie['year'])
+            .toList();
+        if (exact.isEmpty) {
+          throw Exception('Không ánh xạ được phim YTS sang Radarr');
+        }
+        target = Map<String, dynamic>.from(exact.first);
+        if (mounted) setState(() => selected = target);
+      }
       final x =
-          await widget.api.gateway('/v1/movies/${movie['tmdbId']}/releases');
+          await widget.api.gateway('/v1/movies/${target['tmdbId']}/releases');
       if (!mounted) return;
       setState(() => releases = x);
     } catch (e) {
@@ -498,6 +546,10 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
                           const Padding(
                               padding: EdgeInsets.only(left: 10),
                               child: Chip(label: Text('Dữ liệu gần nhất'))),
+                        if (!stale && trendingSource == 'yts')
+                          const Padding(
+                              padding: EdgeInsets.only(left: 10),
+                              child: Chip(label: Text('Phổ biến trên YTS'))),
                       ]),
                     )),
               Expanded(
@@ -644,6 +696,233 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
             ]));
 }
 
+class SeriesSearchPage extends StatefulWidget {
+  const SeriesSearchPage({super.key, required this.api});
+  final Api api;
+  @override
+  State<SeriesSearchPage> createState() => _SeriesSearchPageState();
+}
+
+class _SeriesSearchPageState extends State<SeriesSearchPage> {
+  final query = TextEditingController();
+  List<dynamic> series = [], episodes = [], releases = [];
+  Map<String, dynamic>? selected;
+  int? selectedSeason;
+  int? releaseEpisodeId;
+  bool busy = false;
+  String? error;
+
+  @override
+  void dispose() {
+    query.dispose();
+    super.dispose();
+  }
+
+  Future<void> search() async {
+    final term = query.text.trim();
+    if (term.isEmpty) return;
+    setState(() {
+      busy = true;
+      error = null;
+      selected = null;
+    });
+    try {
+      final value = await widget.api
+          .gateway('/v1/series/search?q=${Uri.encodeQueryComponent(term)}');
+      if (mounted) setState(() => series = value);
+    } catch (_) {
+      if (mounted) setState(() => error = 'Không thể tìm TV show lúc này');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> openSeries(Map<String, dynamic> item) async {
+    setState(() {
+      selected = item;
+      busy = true;
+      error = null;
+      releases = [];
+    });
+    try {
+      final value =
+          await widget.api.gateway('/v1/series/${item['tvdbId']}/episodes');
+      if (!mounted) return;
+      final values = value as List;
+      final seasons = values
+          .map((episode) => episode['seasonNumber'] as int)
+          .where((number) => number > 0)
+          .toSet()
+          .toList()
+        ..sort();
+      setState(() {
+        episodes = values;
+        selectedSeason = seasons.isEmpty ? null : seasons.first;
+      });
+    } catch (_) {
+      if (mounted) setState(() => error = 'Không tải được danh sách tập');
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> findReleases({int? episodeId}) async {
+    if (episodeId == null && selectedSeason == null) return;
+    setState(() {
+      busy = true;
+      error = null;
+      releases = [];
+      releaseEpisodeId = episodeId;
+    });
+    final scope = episodeId == null
+        ? 'seasonNumber=$selectedSeason'
+        : 'episodeId=$episodeId';
+    try {
+      final value = await widget.api
+          .gateway('/v1/series/${selected!['tvdbId']}/releases?$scope');
+      if (mounted) setState(() => releases = value);
+    } catch (exception) {
+      if (mounted) {
+        setState(() => error = '$exception'.contains('season_pack_unavailable')
+            ? 'Không có season pack. Hãy chọn từng tập bên dưới.'
+            : 'Không tìm thấy bản tải phù hợp');
+      }
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> download(dynamic release) async {
+    try {
+      await widget.api.gateway('/v1/series/${selected!['tvdbId']}/download',
+          method: 'POST',
+          body: {
+            'guid': release['guid'],
+            'indexerId': release['indexerId'],
+            if (releaseEpisodeId != null) 'episodeId': releaseEpisodeId,
+            if (releaseEpisodeId == null && selectedSeason != null)
+              'seasonNumber': selectedSeason,
+          });
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('Đã gửi sang Sonarr/qBittorrent')));
+      }
+    } catch (exception) {
+      if (mounted) showError(context, exception);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) => PageFrame(
+      title: selected == null ? 'Tìm TV Show' : 'Chi tiết TV Show',
+      child: selected == null ? searchView() : detailView());
+
+  Widget searchView() => Column(children: [
+        Row(children: [
+          Expanded(
+              child: TextField(
+                  controller: query,
+                  onSubmitted: (_) => search(),
+                  decoration: const InputDecoration(
+                      labelText: 'Tên TV show',
+                      prefixIcon: Icon(Icons.search)))),
+          const SizedBox(width: 12),
+          FilledButton(
+              onPressed: busy ? null : search, child: const Text('Tìm'))
+        ]),
+        if (busy) const LinearProgressIndicator(),
+        if (error != null)
+          Text(error!,
+              style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        Expanded(
+            child: series.isEmpty
+                ? const Center(
+                    child: Text('Nhập tên TV show để tìm qua Sonarr'))
+                : ListView(
+                    children: series
+                        .map((item) => Card(
+                            child: ListTile(
+                                title: Text(
+                                    '${item['title']} (${item['year'] ?? ''})'),
+                                subtitle: Text(item['overview'] ?? '',
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis),
+                                onTap: () => openSeries(
+                                    Map<String, dynamic>.from(item)))))
+                        .toList()))
+      ]);
+
+  Widget detailView() {
+    final seasonNumbers = episodes
+        .map((episode) => episode['seasonNumber'] as int)
+        .where((number) => number > 0)
+        .toSet()
+        .toList()
+      ..sort();
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+      TextButton.icon(
+          onPressed: () => setState(() {
+                selected = null;
+                releases = [];
+              }),
+          icon: const Icon(Icons.arrow_back),
+          label: const Text('Quay lại kết quả')),
+      Text('${selected!['title']} (${selected!['year'] ?? ''})',
+          style: Theme.of(context).textTheme.headlineSmall),
+      const SizedBox(height: 8),
+      Wrap(
+          spacing: 12,
+          crossAxisAlignment: WrapCrossAlignment.center,
+          children: [
+            DropdownButton<int>(
+                value: selectedSeason,
+                items: seasonNumbers
+                    .map((number) => DropdownMenuItem(
+                        value: number, child: Text('Season $number')))
+                    .toList(),
+                onChanged: (value) => setState(() {
+                      selectedSeason = value;
+                      releases = [];
+                    })),
+            FilledButton(
+                onPressed: busy ? null : () => findReleases(),
+                child: const Text('Tìm season pack')),
+          ]),
+      if (busy) const LinearProgressIndicator(),
+      if (error != null)
+        Text(error!,
+            style: TextStyle(color: Theme.of(context).colorScheme.error)),
+      Expanded(
+          child: releases.isNotEmpty
+              ? ListView(
+                  children: releases
+                      .map((release) => Card(
+                          child: ListTile(
+                              title: Text(release['title']),
+                              subtitle: Text(
+                                  '${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']}'),
+                              trailing: FilledButton(
+                                  onPressed: release['rejected'] == true
+                                      ? null
+                                      : () => download(release),
+                                  child: const Text('Tải')))))
+                      .toList())
+              : ListView(
+                  children: episodes
+                      .where((episode) =>
+                          episode['seasonNumber'] == selectedSeason)
+                      .map((episode) => ListTile(
+                          title: Text(
+                              'S${episode['seasonNumber'].toString().padLeft(2, '0')}E${episode['episodeNumber'].toString().padLeft(2, '0')} • ${episode['title']}'),
+                          trailing: OutlinedButton(
+                              onPressed: () =>
+                                  findReleases(episodeId: episode['episodeId']),
+                              child: const Text('Chọn bản tải'))))
+                      .toList()))
+    ]);
+  }
+}
+
 class DownloadsPage extends StatefulWidget {
   const DownloadsPage({super.key, required this.api});
   final Api api;
@@ -730,7 +1009,7 @@ class _DownloadsPageState extends State<DownloadsPage> {
                                       LinearProgressIndicator(
                                           value: (x['progress'] ?? 0) / 100),
                                       Text(
-                                          '${x['progress']}% • ${stateLabel(x['state'])} • ${formatBytes(x['downloadSpeed'])}/s')
+                                          '${x['category'] == 'series' ? 'TV Show' : 'Phim'} • ${x['progress']}% • ${stateLabel(x['state'])} • ${formatBytes(x['downloadSpeed'])}/s')
                                     ]),
                                 trailing: Wrap(children: [
                                   IconButton(

@@ -164,6 +164,53 @@ export class MediaClients {
     return items.map(item => ({ tmdbId: item.tmdbId, title: item.title, year: item.year, overview: item.overview, poster: item.remotePoster, runtime: item.runtime, genres: item.genres ?? [], inLibrary: Boolean(item.id) }));
   }
 
+  normalizeSeries(item) {
+    return { mediaType: 'series', tvdbId: item.tvdbId, title: item.title, year: item.year, overview: item.overview, poster: item.remotePoster, inLibrary: Boolean(item.id), seasons: item.seasons ?? [] };
+  }
+
+  async searchSeries(term) {
+    return (await this.arr('sonarr', `/series/lookup?term=${encodeURIComponent(term)}`)).map(item => this.normalizeSeries(item));
+  }
+
+  async series(tvdbId) {
+    const items = await this.arr('sonarr', `/series/lookup?term=tvdb:${encodeURIComponent(tvdbId)}`);
+    if (!items[0]) throw new Error('Series not found');
+    return items[0];
+  }
+
+  async ensureSeries(tvdbId) {
+    const existing = await this.arr('sonarr', `/series?tvdbId=${encodeURIComponent(tvdbId)}`);
+    if (existing[0]) return existing[0];
+    const series = await this.series(tvdbId);
+    const profiles = await this.arr('sonarr', '/qualityprofile');
+    return this.arr('sonarr', '/series', { method: 'POST', body: JSON.stringify({
+      ...series, qualityProfileId: profiles[0]?.id, rootFolderPath: '/data/library/series', monitored: false, seasonFolder: true, addOptions: { monitor: 'none', searchForMissingEpisodes: false, searchForCutoffUnmetEpisodes: false },
+    }) });
+  }
+
+  async seriesEpisodes(tvdbId) {
+    const series = await this.ensureSeries(tvdbId);
+    return (await this.arr('sonarr', `/episode?seriesId=${series.id}`)).map(item => ({ episodeId: item.id, seasonNumber: item.seasonNumber, episodeNumber: item.episodeNumber, title: item.title, airDate: item.airDate, hasFile: Boolean(item.hasFile) }));
+  }
+
+  async seriesReleases(tvdbId, selection) {
+    const series = await this.ensureSeries(tvdbId);
+    const cacheKey = selection.episodeId ? `series:${tvdbId}:episode:${selection.episodeId}` : `series:${tvdbId}:season:${selection.seasonNumber}`;
+    return this.releaseCache.get(cacheKey, async () => {
+      const path = selection.episodeId
+        ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
+        : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
+      let releases = await this.arr('sonarr', path);
+      if (!selection.episodeId) releases = releases.filter(item => item.fullSeason === true && Number(item.seasonNumber) === Number(selection.seasonNumber));
+      return releases.map(normalizeRelease);
+    });
+  }
+
+  async downloadSeriesRelease(tvdbId, selection) {
+    await this.ensureSeries(tvdbId);
+    return this.arr('sonarr', '/release', { method: 'POST', body: JSON.stringify({ guid: selection.guid, indexerId: selection.indexerId }) });
+  }
+
   async movie(tmdbId) {
     const items = await this.arr('radarr', `/movie/lookup?term=tmdb:${encodeURIComponent(tmdbId)}`);
     if (!items[0]) throw new Error('Movie not found');
