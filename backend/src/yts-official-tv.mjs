@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { JsonTrendingStore } from './trending-movies.mjs';
 
 const TOKEN_TTL_MS = 5 * 60 * 1000;
 const MAX_RESPONSE_BYTES = 2 * 1024 * 1024;
@@ -94,6 +95,23 @@ function releaseCodec(title) {
   return 'Unknown';
 }
 
+function normalizeTvDiscovery(value) {
+  const date = value.first_air_date ?? value.firstAirDate ?? '';
+  const poster = value.poster_path ?? value.posterPath;
+  const providerId = Number(value.id ?? value.providerId ?? 0);
+  return {
+    mediaType: 'series',
+    providerId,
+    tvdbId: Number.isFinite(Number(value.tvdbId)) && Number(value.tvdbId) > 0 ? Number(value.tvdbId) : null,
+    title: value.name ?? value.title ?? '',
+    year: /^\d{4}/.test(date) ? Number(date.slice(0, 4)) : Number(value.year ?? 0) || null,
+    overview: value.overview ?? '',
+    poster: poster ? `https://image.tmdb.org/t/p/w500${poster}` : null,
+    rating: Number(value.vote_average ?? value.rating ?? 0),
+    inLibrary: false,
+  };
+}
+
 export function normalizeTvTorrent(row, scope, secret, now = Date.now()) {
   const payload = { ...scope, title: row.title, magnetUrl: row.magnetUrl };
   return {
@@ -111,7 +129,7 @@ export function normalizeTvTorrent(row, scope, secret, now = Date.now()) {
 }
 
 export class YtsOfficialTvProvider {
-  constructor({ baseUrl = 'https://en.yts-official.com/', secret, fetchImpl = fetch, timeoutMs = 15000, now = Date.now } = {}) {
+  constructor({ baseUrl = 'https://en.yts-official.com/', secret, fetchImpl = fetch, timeoutMs = 15000, now = Date.now, store, cachePath = '/data/cache/trending-tv.json' } = {}) {
     const url = new URL(baseUrl);
     if (url.protocol !== 'https:') throw new Error('YTS Official TV URL must use HTTPS');
     if (!secret) throw new Error('TV download token secret is required');
@@ -120,11 +138,13 @@ export class YtsOfficialTvProvider {
     this.fetchImpl = fetchImpl;
     this.timeoutMs = timeoutMs;
     this.now = now;
+    this.store = store ?? new JsonTrendingStore(cachePath);
+    this.trendingFlight = null;
   }
 
-  async search(scope) {
+  async request(params) {
     const url = new URL(this.baseUrl);
-    url.search = new URLSearchParams({ api: 'torrents', mode: 'tv', name: scope.title, year: String(scope.year ?? ''), quality: 'all' });
+    url.search = new URLSearchParams(params);
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
@@ -132,16 +152,45 @@ export class YtsOfficialTvProvider {
       if (!response.ok || !String(response.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) throw new TvProviderError('yts_tv_provider_unavailable');
       const text = await response.text();
       if (Buffer.byteLength(text) > MAX_RESPONSE_BYTES) throw new TvProviderError('yts_tv_provider_unavailable');
-      const data = JSON.parse(text);
+      return JSON.parse(text);
+    } catch (error) {
+      if (error instanceof TvProviderError) throw error;
+      throw new TvProviderError('yts_tv_provider_unavailable');
+    } finally { clearTimeout(timer); }
+  }
+
+  async search(scope) {
+    try {
+      const data = await this.request({ api: 'torrents', mode: 'tv', name: scope.title, year: String(scope.year ?? ''), quality: 'all' });
       const rows = filterTvTorrents(data.hits, scope);
       if (rows.length === 0) throw new TvProviderError('yts_tv_release_unavailable');
       return rows.map(row => normalizeTvTorrent(row, scope, this.secret, this.now()));
     } catch (error) {
       if (error instanceof TvProviderError) throw error;
       throw new TvProviderError('yts_tv_provider_unavailable');
-    } finally {
-      clearTimeout(timer);
+    } finally {}
+  }
+
+  async trending() {
+    if (this.trendingFlight) return this.trendingFlight;
+    this.trendingFlight = this.loadTrending().finally(() => { this.trendingFlight = null; });
+    return this.trendingFlight;
+  }
+
+  async loadTrending() {
+    for (const [type, source] of [['trending', 'yts_official'], ['popular', 'popular']]) {
+      try {
+        const data = await this.request({ api: type, mode: 'tv', page: '1', sort: 'popularity.desc' });
+        const items = (data.results ?? []).map(normalizeTvDiscovery).filter(item => item.providerId > 0 && item.title).slice(0, 40);
+        if (items.length) {
+          await this.store.write(items);
+          return { items, stale: false, source };
+        }
+      } catch {}
     }
+    const items = await this.store.read();
+    if (items.length) return { items, stale: true, source: 'cache' };
+    return { items: [], stale: false, source: 'unavailable' };
   }
 
   resolveToken(token, expectedScope) {
