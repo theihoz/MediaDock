@@ -7,7 +7,7 @@ Bổ sung Nyaa cho cả phim và TV Show mà không để Cloudflare hoặc mộ
 ## Kiến trúc nguồn
 
 - `Nyaa.si` là nguồn Nyaa chính và được truy cập qua FlareSolverr đã có trong media stack.
-- `Nyaa.land` là mirror dự phòng, được truy cập trực tiếp qua indexer Prowlarr tương thích.
+- `Nyaa.land` là mirror dự phòng. Kiểm tra runtime ngày 2026-08-13 xác nhận mirror cũng bật Cloudflare, vì vậy nó dùng FlareSolverr nhưng vẫn là indexer và endpoint độc lập.
 - Hai endpoint Nyaa được cấu hình thành hai indexer riêng, cùng tag `nyaa-anime` và được đồng bộ sang cả Radarr lẫn Sonarr.
 - YTS, EZTV, Internet Archive và Tokyo Toshokan tiếp tục hoạt động độc lập.
 - Tìm release gọi tất cả nguồn được bật đồng thời. Mỗi nhánh có timeout riêng; một nguồn lỗi không hủy kết quả của nguồn khác.
@@ -18,7 +18,7 @@ Bootstrap idempotent sẽ:
 
 1. Tạo hoặc cập nhật FlareSolverr indexer proxy tại `http://flaresolverr:8191`.
 2. Tạo hoặc cập nhật `Nyaa.si` với base URL chính thức và gắn proxy FlareSolverr.
-3. Tạo hoặc cập nhật `Nyaa.land` bằng cùng schema Nyaa nhưng thay base URL bằng mirror và không bắt buộc proxy.
+3. Tạo hoặc cập nhật `Nyaa.land` bằng cùng schema Nyaa, thay base URL bằng mirror và gắn proxy FlareSolverr do kiểm tra runtime xác nhận Cloudflare Protection.
 4. Bật phạm vi movie và series, gắn tag `nyaa-anime`, đồng bộ Radarr/Sonarr và không tạo bản trùng khi bootstrap chạy lại.
 5. Nếu schema Prowlarr không cho thay base URL hoặc mirror không tương thích, giữ indexer ở trạng thái `needs_manual_configuration` thay vì làm bootstrap thất bại.
 

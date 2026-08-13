@@ -45,6 +45,9 @@ class BazarrProfileTests(unittest.TestCase):
   wanted_search_frequency: 24
 radarr:
   use_radarr: true
+opensubtitlescom:
+  password: old-secret
+  username: old-user
 """, encoding="utf-8")
 
     def tearDown(self):
@@ -73,12 +76,32 @@ radarr:
 
         config = self.config.read_text(encoding="utf-8")
         self.assertIn("  enabled_providers:\n  - gestdown\n  - yifysubtitles", config)
+        self.assertNotIn("  - opensubtitlescom", config)
         self.assertIn(f"  movie_default_profile: {profile_id}", config)
         self.assertIn(f"  serie_default_profile: {profile_id}", config)
         self.assertIn("  use_embedded_subs: false", config)
         self.assertIn("  adaptive_searching: true", config)
+        self.assertIn("  concurrent_jobs: 4", config)
         self.assertIn("  wanted_search_frequency: 6", config)
         self.assertIn("  utf8_encode: true", config)
+
+    def test_enables_opensubtitles_only_with_complete_local_credentials(self):
+        configure_profile(
+            self.db, self.config, self.backups, "20260813-120000",
+            opensubtitles_username="local-user", opensubtitles_password="local-password",
+        )
+        config = self.config.read_text(encoding="utf-8")
+        self.assertIn("  enabled_providers:\n  - gestdown\n  - yifysubtitles\n  - opensubtitlescom", config)
+        self.assertIn('opensubtitlescom:\n  password: "local-password"\n  username: "local-user"', config)
+
+    def test_partial_opensubtitles_credentials_are_not_written_or_enabled(self):
+        configure_profile(
+            self.db, self.config, self.backups, "20260813-120000",
+            opensubtitles_username="local-user", opensubtitles_password="",
+        )
+        config = self.config.read_text(encoding="utf-8")
+        self.assertNotIn("  - opensubtitlescom", config)
+        self.assertIn('opensubtitlescom:\n  password: ""\n  username: ""', config)
 
     def test_second_run_is_idempotent_but_keeps_a_recovery_backup(self):
         first = configure_profile(self.db, self.config, self.backups, "20260813-120000")

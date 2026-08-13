@@ -5,12 +5,13 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { MediaClients } from './media-clients.mjs';
 import { createServiceRegistry, publicService } from './services.mjs';
-import { filterSubtitleResults, mergeSubtitleResults, normalizeSubtitle, shouldUseDirectFallback } from './subtitle-providers.mjs';
+import { mergeSubtitleResults, normalizeSubtitle, selectSubtitleResults, shouldUseDirectFallback } from './subtitle-providers.mjs';
 import { createSubtitleToken, verifySubtitleToken } from './subtitle-token.mjs';
 import { safeArchiveEntry, safeSubtitleName, validateSubtitlePayload } from './subtitle-files.mjs';
 import { YifyDirectProvider } from './yify-direct.mjs';
 import { JsonTrendingStore, TrendingMovies, createSeerrFetcher, createYtsPopularFetcher } from './trending-movies.mjs';
 import { TvProviderError, YtsOfficialTvProvider } from './yts-official-tv.mjs';
+import { UnifiedSearch } from './unified-search.mjs';
 
 const registry = createServiceRegistry({
   qbittorrent: { url: process.env.QBITTORRENT_URL ?? 'http://qbittorrent:8080' },
@@ -33,6 +34,8 @@ const media = new MediaClients({
   radarrConfig: process.env.RADARR_CONFIG ?? '/service-config/radarr.xml',
   sonarrUrl: registry.sonarr.url,
   sonarrConfig: process.env.SONARR_CONFIG ?? '/service-config/sonarr.xml',
+  prowlarrUrl: registry.prowlarr.url,
+  prowlarrConfig: process.env.PROWLARR_CONFIG ?? '/service-config/prowlarr.xml',
   bazarrUrl: registry.bazarr.url,
   bazarrConfig: process.env.BAZARR_CONFIG ?? '/service-config/bazarr.yaml',
   qbitUrl: registry.qbittorrent.url,
@@ -41,7 +44,12 @@ const media = new MediaClients({
   jellyfinUrl: registry.jellyfin.url,
   jellyfinApiKey: process.env.JELLYFIN_API_KEY,
   libraryRoot: process.env.MOVIES_ROOT ?? '/data/library/movies',
+  restrictDefaultIndexers: true,
   tvProvider,
+});
+const unifiedSearch = new UnifiedSearch({
+  movieSearch: query => media.searchMovies(query),
+  seriesSearch: query => media.searchSeries(query),
 });
 
 const subtitleTokenSecret = process.env.SUBTITLE_TOKEN_SECRET ?? 'local-development-change-me';
@@ -73,13 +81,14 @@ async function unpackDirectSubtitle(downloaded) {
 }
 
 function validSubtitleQuery(language, provider) {
-  return ['vi', 'en'].includes(language) && ['all', 'bazarr', 'yifysubtitles', 'gestdown', 'yify-direct'].includes(provider);
+  return ['vi', 'en'].includes(language) && ['all', 'bazarr', 'yifysubtitles', 'gestdown', 'opensubtitlescom', 'yify-direct'].includes(provider);
 }
 
 function bazarrResults(result, language, provider, mediaType = 'movie') {
   const raw = result?.data ?? result ?? [];
-  return filterSubtitleResults(raw, language, provider === 'bazarr' ? 'all' : provider).map(value => ({
+  return selectSubtitleResults(raw, language, provider === 'bazarr' ? 'all' : provider).map(value => ({
     ...normalizeSubtitle(value, 'bazarr'),
+    fallback: value.fallback === true,
     downloadToken: createSubtitleToken({ source: 'bazarr', mediaType, selection: value }, subtitleTokenSecret),
   }));
 }
@@ -110,6 +119,14 @@ async function route(req, res) {
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { status: 'ready' });
   if (req.method === 'GET' && url.pathname === '/v1/services') return send(res, 200, Object.values(registry).map(publicService));
+  if (req.method === 'GET' && url.pathname === '/v1/sources') return send(res, 200, await media.downloadSources());
+  if (req.method === 'GET' && url.pathname === '/v1/discover/search') return send(res, 200, await unifiedSearch.search({
+    query: url.searchParams.get('q') ?? '',
+    type: url.searchParams.get('type') ?? 'all',
+    year: url.searchParams.get('year'),
+    library: url.searchParams.get('library') ?? 'all',
+    limit: url.searchParams.get('limit') ?? 50,
+  }));
   if (req.method === 'GET' && url.pathname === '/v1/movies/trending') return send(res, 200, await trending.get());
   if (req.method === 'GET' && url.pathname === '/v1/movies/search') return send(res, 200, await media.searchMovies(url.searchParams.get('q') ?? ''));
   if (req.method === 'GET' && url.pathname === '/v1/series/search') return send(res, 200, await media.searchSeries(url.searchParams.get('q') ?? ''));
@@ -124,7 +141,12 @@ async function route(req, res) {
     const episodeId = url.searchParams.get('episodeId');
     const seasonNumber = url.searchParams.get('seasonNumber');
     if (!episodeId && seasonNumber === null) return send(res, 400, { error: 'series_scope_required' });
-    const releases = await media.seriesReleases(seriesMatch[1], episodeId ? { episodeId: Number(episodeId) } : { seasonNumber: Number(seasonNumber) });
+    const freePublicDomain = url.searchParams.get('freePublicDomain') === 'true';
+    const releases = await media.seriesReleases(
+      seriesMatch[1],
+      episodeId ? { episodeId: Number(episodeId), freePublicDomain } : { seasonNumber: Number(seasonNumber), freePublicDomain },
+      { force: url.searchParams.get('refresh') === 'true' },
+    );
     if (!episodeId && releases.length === 0) return send(res, 404, { error: 'season_pack_unavailable' });
     return send(res, 200, releases);
   }
@@ -134,7 +156,10 @@ async function route(req, res) {
   let match = url.pathname.match(/^\/v1\/movies\/(\d+)$/);
   if (req.method === 'GET' && match) return send(res, 200, await media.movie(match[1]));
   match = url.pathname.match(/^\/v1\/movies\/(\d+)\/releases$/);
-  if (req.method === 'GET' && match) return send(res, 200, await media.releases(match[1]));
+  if (req.method === 'GET' && match) return send(res, 200, await media.releases(match[1], {
+    freePublicDomain: url.searchParams.get('freePublicDomain') === 'true',
+    force: url.searchParams.get('refresh') === 'true',
+  }));
   match = url.pathname.match(/^\/v1\/movies\/(\d+)\/download$/);
   if (req.method === 'POST' && match) return send(res, 202, await media.downloadRelease(match[1], await body(req)));
 
@@ -147,6 +172,10 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/v1/library') return send(res, 200, await media.library());
   if (req.method === 'POST' && url.pathname === '/v1/library/refresh') { await media.refreshJellyfin(); return send(res, 202, { state: 'scanning' }); }
   if (req.method === 'GET' && url.pathname === '/v1/library/subtitle-media') return send(res, 200, await media.subtitleMedia());
+  match = url.pathname.match(/^\/v1\/library\/subtitle-media\/(\d+)\/seasons\/(\d+)$/);
+  if (req.method === 'GET' && match) return send(res, 200, await media.subtitleSeason(match[1], match[2]));
+  match = url.pathname.match(/^\/v1\/library\/subtitle-media\/(\d+)\/seasons\/(\d+)\/search$/);
+  if (req.method === 'POST' && match) return send(res, 202, await media.searchSeasonSubtitles(match[1], match[2]));
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles$/);
   if (req.method === 'GET' && match) return send(res, 200, await media.managedSubtitles(match[1]));
   match = url.pathname.match(/^\/v1\/library\/(\d+)\/subtitles\/upload$/);
@@ -159,12 +188,20 @@ async function route(req, res) {
     if (!validSubtitleQuery(language, provider)) return send(res, 400, { error: 'invalid_request' });
     if (!['movie', 'episode'].includes(mediaType) || (mediaType === 'episode' && provider === 'yify-direct')) return send(res, 400, { error: 'invalid_request' });
     if (mediaType === 'episode') {
-      const bazarr = bazarrResults(await media.searchEpisodeSubtitles(match[1], language), language, provider, 'episode');
+      const result = provider === 'all'
+        ? await media.searchAllEpisodeSubtitles(match[1])
+        : await media.searchEpisodeSubtitles(match[1], language);
+      const bazarr = bazarrResults(result, language, provider, 'episode');
       return send(res, 200, { data: bazarr, directEnabled: false });
     }
     const movie = await media.subtitleMovie(match[1]);
     let bazarr = [];
-    if (provider !== 'yify-direct') bazarr = bazarrResults(await media.searchSubtitles(match[1], language), language, provider);
+    if (provider !== 'yify-direct') {
+      const result = provider === 'all'
+        ? await media.searchAllSubtitles(match[1])
+        : await media.searchSubtitles(match[1], language);
+      bazarr = bazarrResults(result, language, provider);
+    }
     const directEnabled = url.searchParams.get('directFallback') === 'true';
     let direct = [];
     if (provider === 'yify-direct' || shouldUseDirectFallback({ enabled: directEnabled && yify.enabled }, bazarr)) direct = await directResults(movie, language);

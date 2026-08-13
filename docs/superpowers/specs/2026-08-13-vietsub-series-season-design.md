@@ -6,9 +6,9 @@ Make the subtitle tab compact for TV shows and anime while prioritizing Vietname
 
 ## Provider policy
 
-- Enable only `gestdown` by default when no credentials are present.
+- Enable `gestdown` and `yifysubtitles` by default when no credentials are present.
 - Enable `opensubtitlescom` when both `OPENSUBTITLES_USERNAME` and `OPENSUBTITLES_PASSWORD` exist in the private `.env`.
-- Do not enable AnimeTosho, AnimeKalesi, AnimeSubInfo, or YIFY Subtitles.
+- Do not enable AnimeTosho, AnimeKalesi, or AnimeSubInfo. Keep YIFY Subtitles enabled as an additional provider.
 - Keep the existing language profile ordered `vi`, then `en`, with cutoff `vi`.
 - English is a fallback and never marks Vietnamese coverage complete.
 - Missing Vietnamese subtitles remain eligible for the six-hour wanted search.

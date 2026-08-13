@@ -18,6 +18,17 @@ function Set-Field($schema, $name, $value) {
 function Set-Property($object, $name, $value) {
   $object | Add-Member -Force -NotePropertyName $name -NotePropertyValue $value
 }
+function Find-Item($items, $property, $value) {
+  foreach ($item in $items) {
+    if ($item -is [System.Array]) {
+      $nested = Find-Item $item $property $value
+      if ($nested) { return $nested }
+      continue
+    }
+    if ($item.$property -eq $value) { return $item }
+  }
+  return $null
+}
 function Invoke-Json($method, $uri, $headers, $body=$null) {
   $args = @{ Method=$method; Uri=$uri; Headers=$headers; ContentType='application/json' }
   if ($null -ne $body) { $args.Body = ($body | ConvertTo-Json -Depth 20) }
@@ -30,9 +41,13 @@ $password = $envValues.LOCAL_ADMIN_PASSWORD; if (-not $password) { $password = '
 
 # Seed the protected last-good discovery cache without starting any service.
 $trendingCache = 'D:\Media\cache\trending.json'
-if (-not (Test-Path -LiteralPath $trendingCache)) {
+$cachedTrendingCount = 0
+if (Test-Path -LiteralPath $trendingCache) {
+  try { $cachedTrendingCount = @((Get-Content $trendingCache -Raw | ConvertFrom-Json)).Count } catch {}
+}
+if ($cachedTrendingCount -lt 180) {
   try {
-    $popular = Invoke-RestMethod 'https://movies-api.accel.li/api/v2/list_movies.json?limit=40&sort_by=download_count' -TimeoutSec 8
+    $popular = Invoke-RestMethod 'https://movies-api.accel.li/api/v2/list_movies.json?limit=80&sort_by=download_count' -TimeoutSec 8
     $cards = @($popular.data.movies | ForEach-Object {
       @{tmdbId=0;ytsId=[int]$_.id;mediaType='movie';title=$_.title;year=[int]$_.year;overview=$_.summary;poster=$_.medium_cover_image;runtime=$_.runtime;genres=@($_.genres);inLibrary=$false;rating=$_.rating}
     })
@@ -117,12 +132,14 @@ foreach ($target in @(@{name='Radarr';url='http://radarr:7878';key=$radarrKey},@
   }
 }
 
-# Internet Archive is retained when already configured, but disabled because its
-# upstream search frequently times out and blocks Radarr's complete result set.
+# TV searches run all configured providers concurrently. Enable the public
+# source here; backend deadlines ensure it cannot block successful providers.
 $existingIndexers = Invoke-Json GET "$pBase/indexer" $pHeaders
 $tags = @(Invoke-Json GET "$pBase/tag" $pHeaders)
-$flareTag = $tags | Where-Object { $_.label -eq 'flaresolverr' } | Select-Object -First 1
+$flareTag = Find-Item $tags 'label' 'flaresolverr'
 if (-not $flareTag) { $flareTag = Invoke-Json POST "$pBase/tag" $pHeaders @{label='flaresolverr'} }
+$nyaaTag = Find-Item $tags 'label' 'nyaa-anime'
+if (-not $nyaaTag) { $nyaaTag = Invoke-Json POST "$pBase/tag" $pHeaders @{label='nyaa-anime'} }
 $proxies = @(Invoke-Json GET "$pBase/indexerProxy" $pHeaders)
 $flareProxy = $proxies | Where-Object { $_.name -eq 'Media FlareSolverr' } | Select-Object -First 1
 if (-not $flareProxy) {
@@ -132,11 +149,54 @@ if (-not $flareProxy) {
   Set-Field $proxy host 'http://flaresolverr:8191/'
   Invoke-Json POST "$pBase/indexerProxy" $pHeaders $proxy | Out-Null
 }
+
+function Ensure-NyaaIndexer($name, $baseUrl, $useFlareSolverr) {
+  $existing = Find-Item $existingIndexers 'name' $name
+  if ($existing) {
+    $target = $existing
+  } else {
+    $schemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
+    $schema = Find-Item $schemas 'name' 'Nyaa.si'
+    if (-not $schema) { $schema = Find-Item $schemas 'name' 'Nyaa' }
+    if (-not $schema) {
+      Write-Warning "$name`: needs_manual_configuration (Nyaa schema unavailable)"
+      return
+    }
+    $target = $schema | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+  }
+  Set-Property $target name $name
+  Set-Property $target enable $true
+  $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
+  if ($profiles.Count -gt 0) { Set-Property $target appProfileId $profiles[0].id }
+  Set-Field $target baseUrl $baseUrl
+  Set-Field $target sonarr_compatibility $true
+  Set-Field $target radarr_compatibility $true
+  Set-Field $target prefer_magnet_links $true
+  Set-Field $target 'torrentBaseSettings.appMinimumSeeders' 0
+  if (-not ($target.fields | Where-Object { $_.name -eq 'baseUrl' })) {
+    Write-Warning "$name`: needs_manual_configuration (baseUrl is not editable)"
+    return
+  }
+  if ($useFlareSolverr) { Set-Property $target tags @($flareTag.id, $nyaaTag.id) }
+  else { Set-Property $target tags @($nyaaTag.id) }
+  if ($existing) { Invoke-Json PUT "$pBase/indexer/$($target.id)?forceSave=true" $pHeaders $target | Out-Null }
+  else { Invoke-Json POST "$pBase/indexer?forceSave=true" $pHeaders $target | Out-Null }
+}
+
+Ensure-NyaaIndexer 'Nyaa.si' 'https://nyaa.si/' $true
+Ensure-NyaaIndexer 'Nyaa.land' 'https://nyaa.land/' $true
+
 $archive = $existingIndexers | Where-Object name -eq 'Internet Archive' | Select-Object -First 1
-if ($archive -and $archive.enable) {
-  Set-Property $archive enable $false
+if ($archive -and -not $archive.enable) {
+  Set-Property $archive enable $true
   Invoke-Json PUT "$pBase/indexer/$($archive.id)" $pHeaders $archive | Out-Null
 }
+
+# Prowlarr currently has no built-in Public Domain Torrents definition and the
+# site does not expose a compatible Torznab/RSS feed. Keep this visible as an
+# explicit manual-feed state rather than adding a fragile scraper.
+$publicDomainSchema = (Invoke-Json GET "$pBase/indexer/schema" $pHeaders) | Where-Object { $_.name -eq 'Public Domain Torrents' } | Select-Object -First 1
+if (-not $publicDomainSchema) { Write-Warning 'Public Domain Torrents: needs_manual_feed (no compatible Prowlarr schema)' }
 
 # YTS is explicitly requested for authorized/local use. Its API does not
 # reliably publish seed counts, so set the per-indexer application minimum to
@@ -171,6 +231,24 @@ if (-not $existingEztv) {
 } elseif (-not $existingEztv.enable) {
   Set-Property $existingEztv enable $true
   Invoke-Json PUT "$pBase/indexer/$($existingEztv.id)" $pHeaders $existingEztv | Out-Null
+}
+
+# Fourth TV source, especially useful for anime where EZTV coverage is sparse.
+# Tokyo Toshokan is used because it is reachable without credentials on this network.
+$existingTokyo = $existingIndexers | Where-Object { $_.name -eq 'Tokyo Toshokan' } | Select-Object -First 1
+if (-not $existingTokyo) {
+  $indexerSchemas = Invoke-Json GET "$pBase/indexer/schema" $pHeaders
+  $tokyo = $indexerSchemas | Where-Object name -eq 'Tokyo Toshokan' | Select-Object -First 1
+  if ($tokyo) {
+    $profiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
+    Set-Property $tokyo name 'Tokyo Toshokan'; Set-Property $tokyo enable $true
+    Set-Property $tokyo appProfileId $profiles[0].id
+    Set-Field $tokyo baseUrl 'https://www.tokyotosho.info/'
+    Invoke-Json POST "$pBase/indexer" $pHeaders $tokyo | Out-Null
+  }
+} elseif (-not $existingTokyo.enable) {
+  Set-Property $existingTokyo enable $true
+  Invoke-Json PUT "$pBase/indexer/$($existingTokyo.id)?forceSave=true" $pHeaders $existingTokyo | Out-Null
 }
 
 $appProfiles = Invoke-Json GET "$pBase/appprofile" $pHeaders
@@ -275,12 +353,17 @@ foreach ($line in [IO.File]::ReadAllLines($bazarrPath)) {
 [IO.File]::WriteAllLines($bazarrPath, $bazarrLines, (New-Object Text.UTF8Encoding($false)))
 $composeEnv = Join-Path $ProjectDir '.env.compose'
 docker compose --env-file $composeEnv stop bazarr | Out-Null
+$openSubArgs = @()
+if ($envValues.OPENSUBTITLES_USERNAME -and $envValues.OPENSUBTITLES_PASSWORD) {
+  $openSubArgs = @('--opensubtitles-username', [string]$envValues.OPENSUBTITLES_USERNAME, '--opensubtitles-password', [string]$envValues.OPENSUBTITLES_PASSWORD)
+}
 $profileOutput = docker compose --env-file $composeEnv run --rm --no-deps --entrypoint python3 bazarr `
   /opt/media-control/bazarr_profile.py `
   --db /config/db/bazarr.db `
   --config /config/config/config.yaml `
   --backup-dir /backups/bazarr `
-  --timestamp (Get-Date -Format 'yyyyMMdd-HHmmss')
+  --timestamp (Get-Date -Format 'yyyyMMdd-HHmmss') `
+  $openSubArgs
 if ($LASTEXITCODE -ne 0) { throw 'Bazarr profile reconciliation failed' }
 $profileResult = $profileOutput | Select-Object -Last 1 | ConvertFrom-Json
 Write-Output "Bazarr profile ready: movies=$($profileResult.moviesUpdated), series=$($profileResult.seriesUpdated)"

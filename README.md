@@ -50,7 +50,17 @@ The client source is in `flutter_app`. On a machine with Flutter Windows desktop
 
 Bazarr remains the automatic subtitle manager. Its `Vietnamese-English`
 profile prioritizes Vietnamese and then English, using the free
-`yifysubtitles` and `gestdown` providers.
+`yifysubtitles` and `gestdown` providers. OpenSubtitles.com joins the same
+concurrent Bazarr search when both local credentials are configured:
+
+```env
+OPENSUBTITLES_USERNAME=<free account username>
+OPENSUBTITLES_PASSWORD=<free account password>
+```
+
+The subtitle tab groups imported TV content by series and season. It displays
+`Vietsub x/y` coverage and loads individual episodes only after a season is
+selected; episodes missing Vietnamese subtitles are shown first.
 
 Media Control also offers an optional manual `YIFY Direct` fallback. The
 backend matches an existing library movie by IMDb ID, returns signed five-minute
@@ -82,3 +92,6 @@ npx --yes gitnexus@latest setup -c codex
 Auto-config supports qBittorrent, Radarr, Sonarr, Prowlarr, Bazarr, and
 Jellyfin. The default local account is `admin / media1234`; do not expose these
 services directly to the Internet with that password.
+
+Samsung TV truy cập qua LAN: http://192.168.100.195:8096.
+Firewall giới hạn Private + LocalSubnet, cổng TCP 8096 và UDP 7359.

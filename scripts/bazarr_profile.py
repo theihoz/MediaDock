@@ -16,6 +16,7 @@ PROFILE_ITEMS = [
 ]
 GENERAL_VALUES = {
     "adaptive_searching": "true",
+    "concurrent_jobs": "4",
     "movie_default_enabled": "true",
     "serie_default_enabled": "true",
     "single_language": "false",
@@ -36,13 +37,20 @@ def _backup_database(connection: sqlite3.Connection, backup_dir: Path, timestamp
     return target
 
 
-def _reconcile_config(config_path: Path, profile_id: int) -> None:
+def _reconcile_config(
+    config_path: Path,
+    profile_id: int,
+    opensubtitles_username: str = "",
+    opensubtitles_password: str = "",
+) -> None:
     lines = config_path.read_text(encoding="utf-8").splitlines()
     wanted = {**GENERAL_VALUES, "movie_default_profile": str(profile_id), "serie_default_profile": str(profile_id)}
     output: list[str] = []
     seen: set[str] = set()
     in_general = False
+    in_opensubtitles = False
     skipping_providers = False
+    opensubtitles_enabled = bool(opensubtitles_username and opensubtitles_password)
 
     for line in lines:
         if line and not line.startswith(" ") and line.endswith(":"):
@@ -51,6 +59,7 @@ def _reconcile_config(config_path: Path, profile_id: int) -> None:
                     if key not in seen:
                         output.append(f"  {key}: {value}")
             in_general = line == "general:"
+            in_opensubtitles = line == "opensubtitlescom:"
             skipping_providers = False
         if in_general and skipping_providers:
             if line.startswith("  - "):
@@ -58,6 +67,8 @@ def _reconcile_config(config_path: Path, profile_id: int) -> None:
             skipping_providers = False
         if in_general and line.startswith("  enabled_providers:"):
             output.extend(["  enabled_providers:", "  - gestdown", "  - yifysubtitles"])
+            if opensubtitles_enabled:
+                output.append("  - opensubtitlescom")
             skipping_providers = True
             continue
         if in_general:
@@ -67,6 +78,12 @@ def _reconcile_config(config_path: Path, profile_id: int) -> None:
                 output.append(f"  {key}: {wanted[key]}")
                 seen.add(key)
                 continue
+        if in_opensubtitles and line.startswith("  username:"):
+            output.append(f"  username: {json.dumps(opensubtitles_username if opensubtitles_enabled else '')}")
+            continue
+        if in_opensubtitles and line.startswith("  password:"):
+            output.append(f"  password: {json.dumps(opensubtitles_password if opensubtitles_enabled else '')}")
+            continue
         output.append(line)
 
     if in_general:
@@ -78,7 +95,14 @@ def _reconcile_config(config_path: Path, profile_id: int) -> None:
     os.replace(temporary, config_path)
 
 
-def configure_profile(db_path: Path, config_path: Path, backup_dir: Path, timestamp: str) -> dict:
+def configure_profile(
+    db_path: Path,
+    config_path: Path,
+    backup_dir: Path,
+    timestamp: str,
+    opensubtitles_username: str = "",
+    opensubtitles_password: str = "",
+) -> dict:
     db_path, config_path, backup_dir = Path(db_path), Path(config_path), Path(backup_dir)
     connection = sqlite3.connect(db_path)
     try:
@@ -111,7 +135,7 @@ def configure_profile(db_path: Path, config_path: Path, backup_dir: Path, timest
     finally:
         connection.close()
 
-    _reconcile_config(config_path, profile_id)
+    _reconcile_config(config_path, profile_id, opensubtitles_username, opensubtitles_password)
     return {"profileId": profile_id, "moviesUpdated": movie_updates, "seriesUpdated": series_updates, "backupPath": str(backup_path)}
 
 
@@ -121,8 +145,13 @@ def main() -> None:
     parser.add_argument("--config", required=True, type=Path)
     parser.add_argument("--backup-dir", required=True, type=Path)
     parser.add_argument("--timestamp", required=True)
+    parser.add_argument("--opensubtitles-username", default="")
+    parser.add_argument("--opensubtitles-password", default="")
     args = parser.parse_args()
-    print(json.dumps(configure_profile(args.db, args.config, args.backup_dir, args.timestamp), separators=(",", ":")))
+    print(json.dumps(configure_profile(
+        args.db, args.config, args.backup_dir, args.timestamp,
+        args.opensubtitles_username, args.opensubtitles_password,
+    ), separators=(",", ":")))
 
 
 if __name__ == "__main__":

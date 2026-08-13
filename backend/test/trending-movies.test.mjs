@@ -34,7 +34,7 @@ test('YTS fetcher uses a bounded request and rejects upstream errors', async () 
     return { ok: true, json: async () => ({ data: { movies: [] } }) };
   }});
   await fetcher();
-  assert.match(requested, /list_movies\.json\?limit=40&sort_by=download_count/);
+  assert.match(requested, /list_movies\.json\?limit=80&sort_by=download_count/);
 });
 
 test('normalizes Seerr discovery without exposing provider fields', () => {
@@ -72,7 +72,7 @@ test('stores a bounded normalized live result', async () => {
   const result = await trending.get();
   assert.equal(result.source, 'seerr');
   assert.equal(result.stale, false);
-  assert.equal(result.items.length, 40);
+  assert.equal(result.items.length, 45);
   assert.deepEqual(await store.read(), result.items);
 });
 

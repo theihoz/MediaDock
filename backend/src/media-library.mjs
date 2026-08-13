@@ -46,6 +46,21 @@ export function normalizeLibraryMovie(movie, jellyfin, subtitleCount = 0) {
   };
 }
 
+export function normalizeLibrarySeries(series, jellyfin) {
+  return {
+    mediaId: series.id,
+    jellyfinId: jellyfin?.Id ?? null,
+    title: series.title ?? '',
+    year: Number(series.year ?? 0),
+    poster: series.images?.find(image => image.coverType === 'poster')?.remoteUrl ?? null,
+    path: series.path ?? '',
+    watched: Boolean(jellyfin?.UserData?.Played),
+    playbackPositionTicks: Number(jellyfin?.UserData?.PlaybackPositionTicks ?? 0),
+    episodeCount: Number(series.statistics?.episodeFileCount ?? 0),
+    type: 'series',
+  };
+}
+
 export function decodeSubtitleUpload(value) {
   const extension = path.extname(String(value.fileName ?? '')).slice(1).toLowerCase();
   if (!supportedSubtitleExtensions.has(extension)) throw new Error('Định dạng phụ đề không được hỗ trợ');

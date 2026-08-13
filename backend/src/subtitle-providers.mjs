@@ -28,10 +28,31 @@ export function filterSubtitleResults(items, language, provider = 'all') {
   });
 }
 
+export function selectSubtitleResults(items, language, provider = 'all') {
+  if (clean(provider).toLowerCase() !== 'all') {
+    return filterSubtitleResults(items, language, provider).map(item => ({ ...item, fallback: false }));
+  }
+  const primary = filterSubtitleResults(items, language, 'all')
+    .map(item => ({ ...item, fallback: false }));
+  const fallback = clean(language).toLowerCase() === 'vi'
+    ? filterSubtitleResults(items, 'en', 'all').map(item => ({ ...item, fallback: true }))
+    : [];
+  return [...primary, ...fallback].sort((left, right) =>
+    Number(left.fallback) - Number(right.fallback) ||
+    clean(left.provider).localeCompare(clean(right.provider)) ||
+    Number(right.score ?? 0) - Number(left.score ?? 0));
+}
+
 export function mergeSubtitleResults(groups) {
   const merged = new Map();
   for (const item of groups.flat()) {
-    const key = `${clean(item.language).toLowerCase()}:${clean(item.release).toLowerCase()}`;
+    const key = [
+      clean(item.provider).toLowerCase(),
+      clean(item.language).toLowerCase(),
+      clean(item.release).toLowerCase(),
+      clean(item.format || 'srt').toLowerCase(),
+      Boolean(item.hearingImpaired),
+    ].join(':');
     const previous = merged.get(key);
     if (!previous || Number(item.score ?? 0) > Number(previous.score ?? 0)) merged.set(key, item);
   }

@@ -2,10 +2,36 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
-test('bootstrap disables Internet Archive and leaves YTS enabled', () => {
+test('bootstrap enables Internet Archive as an independent public TV source', () => {
   const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
-  assert.match(script, /Where-Object name -eq 'Internet Archive'[\s\S]+Set-Property \$archive enable \$false/);
+  assert.match(script, /Where-Object name -eq 'Internet Archive'/);
+  assert.match(script, /Set-Property \$archive enable \$true/);
   assert.match(script, /Where-Object name -eq 'YTS'[\s\S]+Set-Property \$yts enable \$true/);
+});
+
+test('bootstrap enables Tokyo Toshokan idempotently as the fourth TV source', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /Where-Object \{ \$_\.name -eq 'Tokyo Toshokan' \}/);
+  assert.match(script, /Set-Property \$tokyo name 'Tokyo Toshokan'/);
+  assert.match(script, /Set-Property \$tokyo enable \$true/);
+  assert.match(script, /Set-Field \$tokyo baseUrl 'https:\/\/www\.tokyotosho\.info\/'/);
+});
+
+test('bootstrap reconciles both Nyaa endpoints through FlareSolverr', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /Ensure-NyaaIndexer 'Nyaa\.si' 'https:\/\/nyaa\.si\/'/);
+  assert.match(script, /Ensure-NyaaIndexer 'Nyaa\.land' 'https:\/\/nyaa\.land\/' \$true/);
+  assert.match(script, /Set-Property \$target tags @\(\$flareTag\.id, \$nyaaTag\.id\)/);
+  assert.match(script, /Set-Field \$target sonarr_compatibility \$true/);
+  assert.match(script, /Set-Field \$target radarr_compatibility \$true/);
+  assert.match(script, /if \(\$existing\)[\s\S]+Invoke-Json PUT "\$pBase\/indexer\/\$\(\$target\.id\)\?forceSave=true"/);
+  assert.match(script, /needs_manual_configuration \(baseUrl is not editable\)/);
+});
+
+test('bootstrap reports Public Domain Torrents as requiring a manual compatible feed when Prowlarr has no schema', () => {
+  const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
+  assert.match(script, /Public Domain Torrents/);
+  assert.match(script, /needs_manual_feed/);
 });
 
 test('bootstrap updates existing PowerShell object properties without duplicate Add-Member failures', () => {
@@ -34,11 +60,21 @@ test('compose exposes YTS Official TV settings only to the API and keeps manual 
   assert.match(compose, /api:\s*\n\s+build: \.\/backend\s*\n\s+restart: "no"/);
 });
 
+test('API mounts Arr configuration directories so Docker Desktop does not turn config files into empty folders', () => {
+  const compose = fs.readFileSync(new URL('../../docker-compose.yml', import.meta.url), 'utf8');
+  assert.match(compose, /RADARR_CONFIG: \/service-config\/radarr\/config\.xml/);
+  assert.match(compose, /SONARR_CONFIG: \/service-config\/sonarr\/config\.xml/);
+  assert.match(compose, /PROWLARR_CONFIG: \/service-config\/prowlarr\/config\.xml/);
+  assert.match(compose, /\$\{MEDIA_ROOT_DOCKER:-D:\/Media\}\/config\/radarr:\/service-config\/radarr:ro/);
+  assert.match(compose, /\$\{MEDIA_ROOT_DOCKER:-D:\/Media\}\/config\/sonarr:\/service-config\/sonarr:ro/);
+  assert.match(compose, /\$\{MEDIA_ROOT_DOCKER:-D:\/Media\}\/config\/prowlarr:\/service-config\/prowlarr:ro/);
+});
+
 test('bootstrap seeds the protected trending cache from YTS when missing', () => {
   const script = fs.readFileSync(new URL('../../scripts/auto-configure.ps1', import.meta.url), 'utf8');
   assert.match(script, /trending\.json/);
-  assert.match(script, /list_movies\.json\?limit=40&sort_by=download_count/);
-  assert.match(script, /if \(-not \(Test-Path -LiteralPath \$trendingCache\)\)/);
+  assert.match(script, /list_movies\.json\?limit=80&sort_by=download_count/);
+  assert.match(script, /\$cachedTrendingCount -lt 180/);
 });
 
 test('compose bounds Docker stdout logs for every service group', () => {
@@ -72,6 +108,11 @@ test('bootstrap safely reconciles the automatic Vietnamese-English Bazarr profil
   assert.match(script, /action=sync/);
   assert.match(script, /action=search-missing/);
   assert.match(script, /Bazarr profile ready/);
+  assert.match(script, /--opensubtitles-username/);
+  assert.match(script, /--opensubtitles-password/);
+  assert.match(script, /OPENSUBTITLES_USERNAME/);
+  assert.match(script, /OPENSUBTITLES_PASSWORD/);
+  assert.doesNotMatch(script, /Write-Output[^\n]*OPENSUBTITLES_(?:USERNAME|PASSWORD)/);
 });
 
 test('Samsung LAN setup publishes discovery and creates private firewall rules', () => {

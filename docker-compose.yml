@@ -153,16 +153,19 @@ services:
       YTS_OFFICIAL_TV_URL: ${YTS_OFFICIAL_TV_URL:-https://en.yts-official.com/}
       YTS_OFFICIAL_TV_ENABLED: ${YTS_OFFICIAL_TV_ENABLED:-true}
       TV_DOWNLOAD_TOKEN_SECRET: ${TV_DOWNLOAD_TOKEN_SECRET}
-      RADARR_CONFIG: /service-config/radarr.xml
-      SONARR_CONFIG: /service-config/sonarr.xml
+      RADARR_CONFIG: /service-config/radarr/config.xml
+      SONARR_CONFIG: /service-config/sonarr/config.xml
+      PROWLARR_CONFIG: /service-config/prowlarr/config.xml
       BAZARR_CONFIG: /service-config/bazarr.yaml
     volumes:
-      - "${MEDIA_ROOT}/config/radarr/config.xml:/service-config/radarr.xml:ro"
-      - "${MEDIA_ROOT}/config/sonarr/config.xml:/service-config/sonarr.xml:ro"
-      - "${MEDIA_ROOT}/config/bazarr/config/config.yaml:/service-config/bazarr.yaml:ro"
-      - "${MEDIA_ROOT}/config/seerr:/service-config/seerr:ro"
-      - "${MEDIA_ROOT}/library:/data/library"
-      - "${MEDIA_ROOT}/cache:/data/cache"
+      # Docker Desktop resolves this Windows path consistently for both Arr and API.
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/radarr:/service-config/radarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/sonarr:/service-config/sonarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/prowlarr:/service-config/prowlarr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/bazarr/config/config.yaml:/service-config/bazarr.yaml:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/seerr:/service-config/seerr:ro"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/library:/data/library"
+      - "${MEDIA_ROOT_DOCKER:-D:/Media}/cache:/data/cache"
     ports: ["3000:3000"]
     networks: [media]
     logging: *logging

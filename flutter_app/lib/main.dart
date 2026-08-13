@@ -6,6 +6,17 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:media_control/controller_bootstrap.dart';
+import 'package:media_control/unified_search_controller.dart';
+
+List<String> actionableReleaseSources(List<dynamic> releases) {
+  final sources = <String>[];
+  for (final value in releases) {
+    if (value is! Map || value['downloadable'] == false) continue;
+    final source = '${value['source'] ?? 'Prowlarr'}';
+    if (!sources.contains(source)) sources.add(source);
+  }
+  return sources;
+}
 
 void main() => runApp(const MediaControlApp());
 
@@ -263,6 +274,15 @@ void showError(BuildContext context, Object error) {
   ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(message)));
 }
 
+String friendlyDownloadError(Object error) {
+  final value = '$error'.toLowerCase();
+  if (value.contains('qbittorrent') ||
+      value.contains('download_client_rejected')) {
+    return 'qBittorrent chưa nhận bản tải. Hãy kiểm tra Downloads rồi thử lại.';
+  }
+  return 'Không thể gửi bản tải lúc này. Hãy thử lại.';
+}
+
 class OverviewPage extends StatefulWidget {
   const OverviewPage({super.key, required this.api});
   final Api api;
@@ -340,27 +360,167 @@ class DiscoveryPage extends StatefulWidget {
 
 class _DiscoveryPageState extends State<DiscoveryPage> {
   int tab = 0;
+  final searchField = TextEditingController();
+  final movieKey = GlobalKey<_MovieSearchPageState>();
+  final seriesKey = GlobalKey<_SeriesSearchPageState>();
+  late final UnifiedSearchController unified = UnifiedSearchController(
+      search: (query) => widget.api.gateway(
+          '/v1/discover/search?q=${Uri.encodeQueryComponent(query)}&limit=8'));
+
   @override
-  Widget build(BuildContext context) => Column(children: [
-        Padding(
-            padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
-            child: SegmentedButton<int>(
-                segments: const [
-                  ButtonSegment(
-                      value: 0, label: Text('Phim'), icon: Icon(Icons.movie)),
-                  ButtonSegment(
-                      value: 1, label: Text('TV Show'), icon: Icon(Icons.tv))
-                ],
-                selected: {
-                  tab
-                },
-                onSelectionChanged: (value) =>
-                    setState(() => tab = value.first))),
-        Expanded(
-            child: tab == 0
-                ? MovieSearchPage(api: widget.api)
-                : SeriesSearchPage(api: widget.api))
-      ]);
+  void dispose() {
+    searchField.dispose();
+    unified.dispose();
+    super.dispose();
+  }
+
+  void openResult(dynamic item) {
+    final isSeries = item['mediaType'] == 'series';
+    final selectedItem = Map<String, dynamic>.from(item as Map);
+    searchField.clear();
+    unified.updateQuery('');
+    setState(() => tab = isSeries ? 1 : 0);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (isSeries) {
+        seriesKey.currentState?.openFromUnified(selectedItem);
+      } else {
+        movieKey.currentState?.openFromUnified(selectedItem);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) => AnimatedBuilder(
+      animation: unified,
+      builder: (context, _) => Column(children: [
+            Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                child: Column(children: [
+                  TextField(
+                      controller: searchField,
+                      onChanged: unified.updateQuery,
+                      onSubmitted: (_) {
+                        if (unified.items.isNotEmpty) {
+                          openResult(unified.items.first);
+                        }
+                      },
+                      decoration: InputDecoration(
+                          hintText:
+                              'Tìm phim, TV Show, tên khác, diễn viên, đạo diễn, studio…',
+                          prefixIcon: const Icon(Icons.search),
+                          suffixIcon: unified.loading
+                              ? const Padding(
+                                  padding: EdgeInsets.all(12),
+                                  child: SizedBox(
+                                      width: 18,
+                                      height: 18,
+                                      child: CircularProgressIndicator(
+                                          strokeWidth: 2)))
+                              : searchField.text.isEmpty
+                                  ? null
+                                  : IconButton(
+                                      icon: const Icon(Icons.clear),
+                                      onPressed: () {
+                                        searchField.clear();
+                                        unified.updateQuery('');
+                                        setState(() {});
+                                      }))),
+                  if (unified.partial)
+                    const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Chip(label: Text('Một số nguồn chưa phản hồi'))),
+                  if (searchField.text.isEmpty && unified.recent.isNotEmpty)
+                    Align(
+                        alignment: Alignment.centerLeft,
+                        child: Wrap(
+                            spacing: 8,
+                            children: unified.recent
+                                .map((value) => ActionChip(
+                                    avatar: const Icon(Icons.history, size: 16),
+                                    label: Text(value),
+                                    onPressed: () {
+                                      searchField.text = value;
+                                      unified.updateQuery(value);
+                                      setState(() {});
+                                    }))
+                                .toList())),
+                  if (searchField.text.length >= 2 && unified.items.isNotEmpty)
+                    Card(
+                        child: Column(
+                            children: unified.items
+                                .take(8)
+                                .map((item) => ListTile(
+                                    leading: item['poster'] == null
+                                        ? const Icon(
+                                            Icons.image_not_supported_outlined)
+                                        : Image.network(item['poster'],
+                                            width: 38,
+                                            height: 54,
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (_, __, ___) =>
+                                                const Icon(Icons
+                                                    .image_not_supported_outlined)),
+                                    title: Text(
+                                        '${item['title']} (${item['year'] ?? ''})'),
+                                    subtitle: Text(
+                                        '${item['mediaType'] == 'series' ? 'TV Show' : 'Phim'} • Khớp ${item['matchedBy'] ?? 'tiêu đề'}: ${item['matchedText'] ?? item['title']}'),
+                                    onTap: () => openResult(item)))
+                                .toList()))
+                ])),
+            Padding(
+                padding: const EdgeInsets.fromLTRB(24, 16, 24, 0),
+                child: SegmentedButton<int>(
+                    segments: const [
+                      ButtonSegment(
+                          value: 0,
+                          label: Text('Phim'),
+                          icon: Icon(Icons.movie)),
+                      ButtonSegment(
+                          value: 1,
+                          label: Text('TV Show'),
+                          icon: Icon(Icons.tv))
+                    ],
+                    selected: {
+                      tab
+                    },
+                    onSelectionChanged: (value) =>
+                        setState(() => tab = value.first))),
+            Expanded(
+                child: tab == 0
+                    ? MovieSearchPage(key: movieKey, api: widget.api)
+                    : SeriesSearchPage(key: seriesKey, api: widget.api))
+          ]));
+}
+
+class _ReleaseSourceSelector extends StatelessWidget {
+  const _ReleaseSourceSelector({
+    required this.releases,
+    required this.selected,
+    required this.onSelected,
+  });
+
+  final List<dynamic> releases;
+  final String? selected;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final sources = actionableReleaseSources(releases);
+    return Align(
+        alignment: Alignment.centerLeft,
+        child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+                children: sources
+                    .map((source) => Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: ChoiceChip(
+                            label: Text(
+                                '$source (${releases.where((r) => r['source'] == source && r['downloadable'] != false).length})'),
+                            selected: selected == source,
+                            onSelected: (_) => onSelected(source))))
+                    .toList())));
+  }
 }
 
 class MovieSearchPage extends StatefulWidget {
@@ -377,6 +537,7 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
   bool busy = false;
   bool showingSearch = false;
   bool stale = false;
+  String? selectedReleaseSource;
   String trendingSource = 'unavailable';
   String? error;
   @override
@@ -444,7 +605,18 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
     }
   }
 
-  Future<void> loadReleases(Map<String, dynamic> movie) async {
+  void searchFor(String value) {
+    query.text = value;
+    search();
+  }
+
+  void openFromUnified(Map<String, dynamic> movie) {
+    query.text = '${movie['title'] ?? ''}';
+    loadReleases(movie);
+  }
+
+  Future<void> loadReleases(Map<String, dynamic> movie,
+      {bool refresh = false}) async {
     try {
       setState(() {
         selected = movie;
@@ -465,10 +637,13 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
         target = Map<String, dynamic>.from(exact.first);
         if (mounted) setState(() => selected = target);
       }
-      final x =
-          await widget.api.gateway('/v1/movies/${target['tmdbId']}/releases');
+      final x = await widget.api.gateway(
+          '/v1/movies/${target['tmdbId']}/releases${refresh ? '?refresh=true' : ''}');
       if (!mounted) return;
-      setState(() => releases = x);
+      setState(() {
+        releases = x;
+        selectedReleaseSource = actionableReleaseSources(x).firstOrNull;
+      });
     } catch (e) {
       if (mounted) setState(() => error = '$e');
     } finally {
@@ -478,15 +653,19 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
 
   Future<void> download(Map<String, dynamic> release) async {
     try {
-      await widget.api.gateway('/v1/movies/${selected!['tmdbId']}/download',
+      final result = await widget.api.gateway(
+          '/v1/movies/${selected!['tmdbId']}/download',
           method: 'POST',
           body: {'guid': release['guid'], 'indexerId': release['indexerId']});
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('Đã gửi bản tải sang Radarr/qBittorrent')));
+        final duplicate = result is Map && result['duplicate'] == true;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(duplicate
+                ? 'Bản tải này đã có trong Downloads'
+                : 'Đã gửi bản tải sang Radarr/qBittorrent')));
       }
     } catch (e) {
-      if (mounted) showError(context, e);
+      if (mounted) showError(context, friendlyDownloadError(e));
     }
   }
 
@@ -657,7 +836,7 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
                           style: TextStyle(
                               color: Theme.of(context).colorScheme.error))),
                   OutlinedButton.icon(
-                      onPressed: () => loadReleases(selected!),
+                      onPressed: () => loadReleases(selected!, refresh: true),
                       icon: const Icon(Icons.refresh),
                       label: const Text('Thử lại'))
                 ]),
@@ -671,28 +850,39 @@ class _MovieSearchPageState extends State<MovieSearchPage> {
                   const Text('Không tìm thấy bản tải phù hợp'),
                   const SizedBox(height: 8),
                   const Text(
-                      'Hãy kiểm tra indexer trong Prowlarr hoặc thử lại sau.'),
+                      'Nguồn đang bật chưa có bản tải cho đúng nội dung này.'),
                   const SizedBox(height: 12),
                   OutlinedButton.icon(
-                      onPressed: () => loadReleases(selected!),
+                      onPressed: () => loadReleases(selected!, refresh: true),
                       icon: const Icon(Icons.refresh),
                       label: const Text('Tìm lại release'))
                 ]))),
               if (releases.isNotEmpty)
                 Expanded(
-                    child: ListView(
-                        children: releases
-                            .map((r) => Card(
-                                child: ListTile(
-                                    title: Text(r['title']),
-                                    subtitle: Text(
-                                        '${r['quality']} • ${r['codec']} • ${formatBytes(r['size'])} • seed ${r['seeders']}'),
-                                    trailing: FilledButton(
-                                        onPressed: r['rejected'] == true
-                                            ? null
-                                            : () => download(r),
-                                        child: const Text('Tải')))))
-                            .toList())),
+                    child: Column(children: [
+                  _ReleaseSourceSelector(
+                      releases: releases,
+                      selected: selectedReleaseSource,
+                      onSelected: (source) =>
+                          setState(() => selectedReleaseSource = source)),
+                  Expanded(
+                      child: ListView(
+                          children: releases
+                              .where((r) =>
+                                  r['downloadable'] != false &&
+                                  r['source'] == selectedReleaseSource)
+                              .map((r) => Card(
+                                  child: ListTile(
+                                      title: Text(r['title']),
+                                      subtitle: Text(
+                                          '${r['quality']} • ${r['codec']} • ${formatBytes(r['size'])} • seed ${r['seeders']}'),
+                                      trailing: FilledButton(
+                                          onPressed: r['downloadable'] == false
+                                              ? null
+                                              : () => download(r),
+                                          child: const Text('Tải')))))
+                              .toList()))
+                ])),
             ]));
 }
 
@@ -713,6 +903,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
   bool showingEpisodes = false;
   bool showingSearch = false;
   bool trendingStale = false;
+  String? selectedReleaseSource;
   String trendingSource = 'unavailable';
   String? error;
 
@@ -776,6 +967,16 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
     }
   }
 
+  void searchFor(String value) {
+    query.text = value;
+    search();
+  }
+
+  void openFromUnified(Map<String, dynamic> item) {
+    query.text = '${item['title'] ?? ''}';
+    openSeries(item);
+  }
+
   Future<void> openSeries(Map<String, dynamic> item) async {
     setState(() {
       selected = item;
@@ -819,7 +1020,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
     }
   }
 
-  Future<void> findReleases({int? episodeId}) async {
+  Future<void> findReleases({int? episodeId, bool refresh = false}) async {
     if (episodeId == null && selectedSeason == null) return;
     setState(() {
       busy = true;
@@ -832,9 +1033,14 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
         ? 'seasonNumber=$selectedSeason'
         : 'episodeId=$episodeId';
     try {
-      final value = await widget.api
-          .gateway('/v1/series/${selected!['tvdbId']}/releases?$scope');
-      if (mounted) setState(() => releases = value);
+      final value = await widget.api.gateway(
+          '/v1/series/${selected!['tvdbId']}/releases?$scope${refresh ? '&refresh=true' : ''}');
+      if (mounted) {
+        setState(() {
+          releases = value;
+          selectedReleaseSource = actionableReleaseSources(value).firstOrNull;
+        });
+      }
     } catch (exception) {
       if (mounted) {
         setState(() {
@@ -844,6 +1050,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
                   '$exception'.contains('season_pack_unavailable')
               ? 'Không có season pack. Hãy chọn từng tập bên dưới.'
               : '$exception'.contains('tv_provider_unavailable') ||
+                      '$exception'.contains('release_sources_unavailable') ||
                       '$exception'.contains('yts_tv_provider_unavailable')
                   ? 'Các nguồn TV đang tạm thời không kết nối được. Hãy thử lại.'
                   : 'Không tìm thấy bản tải phù hợp';
@@ -856,7 +1063,8 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
 
   Future<void> download(dynamic release) async {
     try {
-      await widget.api.gateway('/v1/series/${selected!['tvdbId']}/download',
+      final result = await widget.api.gateway(
+          '/v1/series/${selected!['tvdbId']}/download',
           method: 'POST',
           body: {
             'downloadToken': release['downloadToken'],
@@ -865,11 +1073,14 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
               'seasonNumber': selectedSeason,
           });
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('Đã gửi sang Sonarr/qBittorrent')));
+        final duplicate = result is Map && result['duplicate'] == true;
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text(duplicate
+                ? 'Bản tải này đã có trong Downloads'
+                : 'Đã gửi sang Sonarr/qBittorrent')));
       }
     } catch (exception) {
-      if (mounted) showError(context, exception);
+      if (mounted) showError(context, friendlyDownloadError(exception));
     }
   }
 
@@ -1057,31 +1268,45 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
                   style:
                       TextStyle(color: Theme.of(context).colorScheme.error))),
           OutlinedButton.icon(
-              onPressed:
-                  busy ? null : () => findReleases(episodeId: releaseEpisodeId),
+              onPressed: busy
+                  ? null
+                  : () =>
+                      findReleases(episodeId: releaseEpisodeId, refresh: true),
               icon: const Icon(Icons.refresh),
               label: const Text('Thử lại')),
         ]),
       Expanded(
           child: releases.isNotEmpty && !showingEpisodes
-              ? ListView(
-                  children: releases
-                      .map((release) => Card(
-                          child: ListTile(
-                              title: Row(children: [
-                                Expanded(child: Text(release['title'])),
-                                Chip(
-                                    label: Text(
-                                        '${release['source'] ?? 'Prowlarr'}')),
-                              ]),
-                              subtitle: Text(
-                                  '${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']} • peer ${release['peers'] ?? 0}${release['rejections'] is List && release['rejections'].isNotEmpty ? ' • ${release['rejections'].join(', ')}' : ''}'),
-                              trailing: FilledButton(
-                                  onPressed: release['rejected'] == true
-                                      ? null
-                                      : () => download(release),
-                                  child: const Text('Tải')))))
-                      .toList())
+              ? Column(children: [
+                  _ReleaseSourceSelector(
+                      releases: releases,
+                      selected: selectedReleaseSource,
+                      onSelected: (source) =>
+                          setState(() => selectedReleaseSource = source)),
+                  Expanded(
+                      child: ListView(
+                          children: releases
+                              .where((release) =>
+                                  release['downloadable'] != false &&
+                                  release['source'] == selectedReleaseSource)
+                              .map((release) => Card(
+                                  child: ListTile(
+                                      title: Row(children: [
+                                        Expanded(child: Text(release['title'])),
+                                        Chip(
+                                            label: Text(
+                                                '${release['source'] ?? 'Prowlarr'}')),
+                                      ]),
+                                      subtitle: Text(
+                                          '${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']} • peer ${release['peers'] ?? 0}${release['rejections'] is List && release['rejections'].isNotEmpty ? ' • ${release['rejections'].join(', ')}' : ''}'),
+                                      trailing: FilledButton(
+                                          onPressed:
+                                              release['downloadable'] == false
+                                                  ? null
+                                                  : () => download(release),
+                                          child: const Text('Tải')))))
+                              .toList()))
+                ])
               : ListView(
                   children: episodes
                       .where((episode) =>
@@ -1216,8 +1441,13 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
   bool busy = false;
   int? mediaId;
   String mediaType = 'movie';
+  String? catalogSelection;
+  dynamic selectedSeries;
+  int? selectedSeason;
   List<dynamic> media = [];
+  List<dynamic> episodes = [];
   List<dynamic> results = [];
+  String? seasonSearchMessage;
   @override
   void initState() {
     super.initState();
@@ -1231,12 +1461,73 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
       setState(() {
         media = value;
         if (media.isNotEmpty) {
-          mediaId ??= media.first['mediaId'];
-          mediaType = '${media.first['type'] ?? 'movie'}';
+          final first = media.first;
+          catalogSelection ??= '${first['type'] ?? 'movie'}:${first['mediaId']}';
+          if (first['type'] == 'series') {
+            selectedSeries = first;
+            mediaId = null;
+            mediaType = 'series';
+          } else {
+            mediaId ??= first['mediaId'];
+            mediaType = '${first['type'] ?? 'movie'}';
+          }
         }
       });
     } catch (e) {
       if (mounted) showError(context, e);
+    }
+  }
+
+  void selectCatalog(String? value) {
+    if (value == null) return;
+    final selected = media.firstWhere(
+        (item) => '${item['type'] ?? 'movie'}:${item['mediaId']}' == value);
+    setState(() {
+      catalogSelection = value;
+      selectedSeason = null;
+      episodes = [];
+      results = [];
+      if (selected['type'] == 'series') {
+        selectedSeries = selected;
+        mediaId = null;
+        mediaType = 'series';
+      } else {
+        selectedSeries = null;
+        mediaId = selected['mediaId'];
+        mediaType = 'movie';
+      }
+      if (mediaType != 'movie' && provider == 'yify-direct') provider = 'all';
+    });
+  }
+
+  Future<void> loadSeason(int seasonNumber) async {
+    final series = selectedSeries;
+    if (series == null) return;
+    setState(() {
+      busy = true;
+      selectedSeason = seasonNumber;
+      episodes = [];
+      results = [];
+    });
+    try {
+      final value = await widget.api.gateway(
+          '/v1/library/subtitle-media/${series['mediaId']}/seasons/$seasonNumber');
+      if (!mounted) return;
+      final rows = value is List ? value : <dynamic>[];
+      setState(() {
+        episodes = rows;
+        if (rows.isNotEmpty) {
+          mediaId = rows.first['mediaId'];
+          mediaType = 'episode';
+        } else {
+          mediaId = null;
+          mediaType = 'series';
+        }
+      });
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => busy = false);
     }
   }
 
@@ -1257,6 +1548,41 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
         results = value is List ? value : (value['data'] ?? []);
         directAvailable = value is Map && value['directEnabled'] == true;
       });
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => busy = false);
+    }
+  }
+
+  Future<void> searchSeason() async {
+    final series = selectedSeries;
+    final seasonNumber = selectedSeason;
+    if (series == null || seasonNumber == null) return;
+    final seriesId = series['mediaId'];
+    setState(() {
+      busy = true;
+      seasonSearchMessage = null;
+      results = [];
+    });
+    try {
+      final result = await widget.api.gateway(
+          '/v1/library/subtitle-media/$seriesId/seasons/$seasonNumber/search',
+          method: 'POST');
+      final catalog = await widget.api.gateway('/v1/library/subtitle-media');
+      if (!mounted) return;
+      final List<dynamic> rows =
+          catalog is List ? List<dynamic>.from(catalog) : <dynamic>[];
+      final refreshedSeries = rows.firstWhere(
+          (item) => item['type'] == 'series' && item['mediaId'] == seriesId,
+          orElse: () => series);
+      setState(() {
+        media = rows;
+        selectedSeries = refreshedSeries;
+        seasonSearchMessage =
+            'Đã có ${result['alreadyAvailable'] ?? 0} • Đã tải ${result['downloaded'] ?? 0} • Không tìm thấy ${result['unavailable'] ?? 0} • Lỗi ${result['failed'] ?? 0}';
+      });
+      await loadSeason(seasonNumber);
     } catch (e) {
       if (mounted) showError(context, e);
     } finally {
@@ -1292,6 +1618,49 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
     }
   }
 
+  Widget subtitleResultTile(dynamic subtitle) => Card(
+      child: ListTile(
+          title: Text(subtitle['release'] ?? 'Subtitle'),
+          subtitle: Text(
+              '${subtitle['provider'] ?? ''} • ${subtitle['language'] ?? ''} • ${subtitle['format'] ?? ''} • score ${subtitle['score'] ?? ''}${subtitle['fallback'] == true ? ' • English fallback' : ''}${subtitle['hearingImpaired'] == true ? ' • HI' : ''}'),
+          trailing: FilledButton(
+              onPressed: subtitle['downloadToken'] == null
+                  ? null
+                  : () => choose(subtitle),
+              child: const Text('Tải'))));
+
+  List<Widget> allProviderResultGroups() {
+    const providers = [
+      ('opensubtitlescom', 'OpenSubtitles.com'),
+      ('gestdown', 'Gestdown'),
+      ('yifysubtitles', 'YIFY Subtitles'),
+    ];
+    return providers.expand((entry) {
+      final providerResults = results
+          .where((item) => '${item['provider'] ?? ''}'.toLowerCase() == entry.$1)
+          .toList()
+        ..sort((left, right) {
+          final fallbackOrder = (left['fallback'] == true ? 1 : 0)
+              .compareTo(right['fallback'] == true ? 1 : 0);
+          if (fallbackOrder != 0) return fallbackOrder;
+          return (right['score'] as num? ?? 0)
+              .compareTo(left['score'] as num? ?? 0);
+        });
+      return <Widget>[
+        Padding(
+            padding: const EdgeInsets.fromLTRB(4, 12, 4, 4),
+            child: Text('${entry.$2} • ${providerResults.length}',
+                style: Theme.of(context).textTheme.titleMedium)),
+        if (providerResults.isEmpty)
+          const Padding(
+              padding: EdgeInsets.fromLTRB(12, 6, 12, 12),
+              child: Text('Không có kết quả'))
+        else
+          ...providerResults.map(subtitleResultTile),
+      ];
+    }).toList();
+  }
+
   @override
   Widget build(BuildContext context) => PageFrame(
       title: 'Phụ đề',
@@ -1303,28 +1672,50 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
             children: [
               SizedBox(
                   width: 300,
-                  child: DropdownButtonFormField<int>(
-                      initialValue: mediaId,
+                  child: DropdownButtonFormField<String>(
+                      key: ValueKey(catalogSelection),
+                      isExpanded: true,
+                      initialValue: catalogSelection,
                       decoration: const InputDecoration(
-                          labelText: 'Phim / tập TV trong thư viện'),
+                          labelText: 'Phim / TV Show trong thư viện'),
                       items: media
-                          .map<DropdownMenuItem<int>>((m) => DropdownMenuItem(
-                              value: m['mediaId'],
+                          .map<DropdownMenuItem<String>>((m) => DropdownMenuItem(
+                              value: '${m['type'] ?? 'movie'}:${m['mediaId']}',
                               child: Text(
-                                  '${m['type'] == 'episode' ? 'TV • ' : ''}${m['title']} (${m['year'] == 0 ? '' : m['year']})',
+                                  '${m['type'] == 'series' ? 'TV • ' : ''}${m['title']} (${m['year'] == 0 ? '' : m['year']})',
                                   overflow: TextOverflow.ellipsis)))
                           .toList(),
-                      onChanged: (v) => setState(() {
-                            mediaId = v;
-                            final selectedMedia = media
-                                .firstWhere((item) => item['mediaId'] == v);
-                            mediaType = '${selectedMedia['type'] ?? 'movie'}';
-                            if (mediaType == 'episode' &&
-                                provider == 'yify-direct') {
-                              provider = 'all';
-                            }
-                            results = [];
-                          }))),
+                      onChanged: selectCatalog)),
+              if (selectedSeries != null)
+                ...((selectedSeries['seasons'] ?? []) as List).map((season) =>
+                    ChoiceChip(
+                        label: Text(
+                            'Season ${season['seasonNumber']} • Vietsub ${season['viAvailable']}/${season['episodeCount']}'),
+                        selected: selectedSeason == season['seasonNumber'],
+                        onSelected: busy
+                            ? null
+                            : (_) => loadSeason(season['seasonNumber']))),
+              if (episodes.isNotEmpty)
+                SizedBox(
+                    width: 380,
+                    child: DropdownButtonFormField<int>(
+                        key: ValueKey('$selectedSeason:$mediaId'),
+                        isExpanded: true,
+                        initialValue: mediaId,
+                        decoration: const InputDecoration(labelText: 'Tập phim'),
+                        items: episodes
+                            .map<DropdownMenuItem<int>>((episode) => DropdownMenuItem(
+                                value: episode['mediaId'],
+                                child: Text(episode['title'], overflow: TextOverflow.ellipsis)))
+                            .toList(),
+                        onChanged: (value) => setState(() {
+                              mediaId = value;
+                              mediaType = 'episode';
+                              results = [];
+                            }))),
+              if (episodes.isNotEmpty &&
+                  episodes.firstWhere((item) => item['mediaId'] == mediaId)['hasVietnamese'] != true)
+                const Chip(label: Text('Thiếu Vietsub')),
               DropdownButton(
                   value: language,
                   items: const [
@@ -1343,6 +1734,9 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
                         value: 'yifysubtitles', child: Text('YIFY qua Bazarr')),
                     const DropdownMenuItem(
                         value: 'gestdown', child: Text('Gestdown')),
+                    const DropdownMenuItem(
+                        value: 'opensubtitlescom',
+                        child: Text('OpenSubtitles.com')),
                     DropdownMenuItem(
                         value: 'yify-direct',
                         enabled: mediaType == 'movie',
@@ -1358,8 +1752,18 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
                 const Text('Cho phép YIFY Direct fallback')
               ]),
               FilledButton(
-                  onPressed: busy ? null : () => search(),
-                  child: const Text('Tìm qua Bazarr')),
+                  onPressed: busy
+                      ? null
+                      : selectedSeries != null && selectedSeason != null
+                          ? searchSeason
+                          : () => search(),
+                  child: Text(selectedSeries != null && selectedSeason != null
+                      ? 'Tìm Vietsub cho Season $selectedSeason'
+                      : 'Tìm qua Bazarr')),
+              if (mediaType == 'episode')
+                OutlinedButton(
+                    onPressed: busy ? null : () => search(),
+                    child: const Text('Tìm riêng tập đang chọn')),
               OutlinedButton(
                   onPressed: busy || mediaType == 'episode'
                       ? null
@@ -1375,6 +1779,12 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
               alignment: Alignment.centerLeft,
               child: Text('YIFY Direct đang tắt trong cấu hình backend.',
                   style: TextStyle(color: Colors.amber))),
+        if (seasonSearchMessage != null)
+          Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                  padding: const EdgeInsets.only(top: 10),
+                  child: Text(seasonSearchMessage!))),
         const SizedBox(height: 12),
         if (busy) const LinearProgressIndicator(),
         Expanded(
@@ -1382,18 +1792,9 @@ class _SubtitlesPageState extends State<SubtitlesPage> {
                 ? const Center(
                     child: Text('Chọn phim, ngôn ngữ và nguồn để tìm'))
                 : ListView(
-                    children: results
-                        .map((s) => Card(
-                            child: ListTile(
-                                title: Text(s['release'] ?? 'Subtitle'),
-                                subtitle: Text(
-                                    '${s['provider'] ?? ''} • ${s['language'] ?? ''} • ${s['format'] ?? ''} • score ${s['score'] ?? ''}${s['hearingImpaired'] == true ? ' • HI' : ''}'),
-                                trailing: FilledButton(
-                                    onPressed: s['downloadToken'] == null
-                                        ? null
-                                        : () => choose(s),
-                                    child: const Text('Tải')))))
-                        .toList())),
+                    children: provider == 'all'
+                        ? allProviderResultGroups()
+                        : results.map(subtitleResultTile).toList())),
       ]));
 }
 
@@ -1435,6 +1836,10 @@ class _LibraryPageState extends State<LibraryPage> {
 
   Future<void> selectMovie(dynamic movie) async {
     setState(() => selected = movie);
+    if (movie['type'] == 'series') {
+      setState(() => subtitles = []);
+      return;
+    }
     await loadSubtitles();
   }
 
@@ -1632,20 +2037,39 @@ class _LibraryPageState extends State<LibraryPage> {
                                                 .textTheme
                                                 .titleMedium),
                                         const Spacer(),
-                                        Text(x['watched'] == true
-                                            ? 'Đã xem'
-                                            : (x['playbackPositionTicks'] ??
-                                                        0) >
-                                                    0
-                                                ? 'Đang xem'
-                                                : 'Chưa xem'),
-                                        Text(
-                                            '${x['videoCodec'] ?? ''} • ${x['audioCodec'] ?? ''} • ${x['subtitleCount'] ?? 0} phụ đề')
+                                        Text(x['type'] == 'series'
+                                            ? 'TV Show • ${x['episodeCount'] ?? 0} tập'
+                                            : x['watched'] == true
+                                                ? 'Đã xem'
+                                                : (x['playbackPositionTicks'] ?? 0) > 0
+                                                    ? 'Đang xem'
+                                                    : 'Chưa xem'),
+                                        if (x['type'] != 'series')
+                                          Text(
+                                              '${x['videoCodec'] ?? ''} • ${x['audioCodec'] ?? ''} • ${x['subtitleCount'] ?? 0} phụ đề')
                                       ])))))
                       .toList()));
 
-  Widget movieDetail() =>
-      Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+  Widget movieDetail() {
+    if (selected['type'] == 'series') {
+      return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        TextButton.icon(
+            onPressed: () => setState(() => selected = null),
+            icon: const Icon(Icons.arrow_back),
+            label: const Text('Quay lại thư viện')),
+        Text('${selected['title']} (${selected['year']})',
+            style: Theme.of(context).textTheme.headlineSmall),
+        Text('TV Show • ${selected['episodeCount'] ?? 0} tập'),
+        const SizedBox(height: 12),
+        FilledButton.icon(
+            onPressed: openJellyfin,
+            icon: const Icon(Icons.play_arrow),
+            label: const Text('Mở trong Jellyfin')),
+        const SizedBox(height: 16),
+        const Text('Phụ đề từng tập được quản lý trong tab Phụ đề.'),
+      ]);
+    }
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
         TextButton.icon(
             onPressed: () => setState(() => selected = null),
             icon: const Icon(Icons.arrow_back),
@@ -1701,6 +2125,7 @@ class _LibraryPageState extends State<LibraryPage> {
                     LinearProgressIndicator(value: deleteProgress.clamp(0, 1))),
         ]))
       ]);
+  }
 }
 
 class ServicesPage extends StatefulWidget {
@@ -1710,8 +2135,19 @@ class ServicesPage extends StatefulWidget {
   State<ServicesPage> createState() => _ServicesPageState();
 }
 
+String sourceStateLabel(String? state) => switch (state) {
+      'ready' => 'Sẵn sàng',
+      'cloudflare_blocked' => 'Bị Cloudflare chặn',
+      'degraded' => 'Tạm thời gián đoạn',
+      'needs_manual_configuration' => 'Cần cấu hình thủ công',
+      'needs_manual_feed' => 'Cần feed thủ công',
+      'disabled' => 'Đã tắt',
+      _ => state ?? 'Không rõ',
+    };
+
 class _ServicesPageState extends State<ServicesPage> {
   List<dynamic> items = [];
+  List<dynamic> sources = [];
   @override
   void initState() {
     super.initState();
@@ -1721,7 +2157,13 @@ class _ServicesPageState extends State<ServicesPage> {
   Future<void> load() async {
     try {
       final x = await widget.api.host('/host/services');
-      if (mounted) setState(() => items = x);
+      final configuredSources = await widget.api.gateway('/v1/sources');
+      if (mounted) {
+        setState(() {
+          items = x;
+          sources = configuredSources;
+        });
+      }
     } catch (e) {
       if (mounted) showError(context, e);
     }
@@ -1763,33 +2205,44 @@ class _ServicesPageState extends State<ServicesPage> {
   Widget build(BuildContext context) => PageFrame(
       title: 'Services',
       actions: [IconButton(onPressed: load, icon: const Icon(Icons.refresh))],
-      child: ListView(
-          children: items
-              .map((x) => Card(
-                  child: ListTile(
-                      leading: Icon(Icons.circle,
-                          color: x['state'] == 'running'
-                              ? Colors.green
-                              : Colors.grey,
-                          size: 14),
-                      title: Text(x['id']),
-                      subtitle: Text('${x['state']} • ${x['health'] ?? ''}'),
-                      trailing: Wrap(children: [
-                        IconButton(
-                            onPressed: () => logs(x['id']),
-                            tooltip: 'Xem log',
-                            icon: const Icon(Icons.article_outlined)),
-                        IconButton(
-                            onPressed: () => act(x['id'], 'start'),
-                            icon: const Icon(Icons.play_arrow)),
-                        IconButton(
-                            onPressed: () => act(x['id'], 'restart'),
-                            icon: const Icon(Icons.restart_alt)),
-                        IconButton(
-                            onPressed: () => act(x['id'], 'stop'),
-                            icon: const Icon(Icons.stop))
-                      ]))))
-              .toList()));
+      child: ListView(children: [
+        if (sources.isNotEmpty)
+          const Padding(
+              padding: EdgeInsets.fromLTRB(4, 4, 4, 8),
+              child: Text('Nguồn tải', style: TextStyle(fontSize: 18))),
+        ...sources.map((source) => Card(
+            child: ListTile(
+                leading: const Icon(Icons.public),
+                title: Text(source['name']),
+                subtitle: Text(
+                    '${sourceStateLabel(source['state'])} • ${(source['scopes'] as List).join(', ')}${source['endpoint'] == null ? '' : ' • ${source['endpoint']}'}${source['reason'] == null ? '' : ' • ${source['reason']}'}')))),
+        if (sources.isNotEmpty)
+          const Padding(
+              padding: EdgeInsets.fromLTRB(4, 18, 4, 8),
+              child: Text('Dịch vụ', style: TextStyle(fontSize: 18))),
+        ...items.map((x) => Card(
+            child: ListTile(
+                leading: Icon(Icons.circle,
+                    color: x['state'] == 'running' ? Colors.green : Colors.grey,
+                    size: 14),
+                title: Text(x['id']),
+                subtitle: Text('${x['state']} • ${x['health'] ?? ''}'),
+                trailing: Wrap(children: [
+                  IconButton(
+                      onPressed: () => logs(x['id']),
+                      tooltip: 'Xem log',
+                      icon: const Icon(Icons.article_outlined)),
+                  IconButton(
+                      onPressed: () => act(x['id'], 'start'),
+                      icon: const Icon(Icons.play_arrow)),
+                  IconButton(
+                      onPressed: () => act(x['id'], 'restart'),
+                      icon: const Icon(Icons.restart_alt)),
+                  IconButton(
+                      onPressed: () => act(x['id'], 'stop'),
+                      icon: const Icon(Icons.stop))
+                ]))))
+      ]));
 }
 
 class SettingsPage extends StatefulWidget {

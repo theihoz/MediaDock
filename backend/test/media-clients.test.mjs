@@ -50,6 +50,35 @@ test('fails a release search with a useful timeout error', async () => {
   await assert.rejects(cache.get('414906', () => new Promise(() => {})), /15 giây/);
 });
 
+test('allows normal indexer latency while searches still run in parallel', () => {
+  const media = new MediaClients({});
+  assert.equal(media.sourceTimeoutMs, 8000);
+  assert.equal(media.tvSourceTimeoutMs, 30000);
+  assert.equal(media.releaseCache.timeoutMs, 31000);
+});
+
+test('does not keep an empty release result in the long-lived cache', async () => {
+  let calls = 0;
+  const cache = new ReleaseSearchCache({ ttlMs: 600000 });
+  const search = async () => {
+    calls += 1;
+    return calls === 1 ? [] : [{ guid: 'available-now' }];
+  };
+
+  assert.deepEqual(await cache.get('movie', search), []);
+  assert.deepEqual(await cache.get('movie', search), [{ guid: 'available-now' }]);
+  assert.equal(calls, 2);
+});
+
+test('a forced release search bypasses a populated cache entry', async () => {
+  let calls = 0;
+  const cache = new ReleaseSearchCache({ ttlMs: 600000 });
+  const search = async () => [{ guid: `result-${++calls}` }];
+
+  assert.deepEqual(await cache.get('movie', search), [{ guid: 'result-1' }]);
+  assert.deepEqual(await cache.get('movie', search, { force: true }), [{ guid: 'result-2' }]);
+});
+
 test('extracts an arr API key without exposing other XML settings', () => {
   assert.equal(extractApiKey('<Config><ApiKey>abc123</ApiKey><Password>hidden</Password></Config>'), 'abc123');
   assert.throws(() => extractApiKey('<Config />'), /API key not found/);
@@ -62,9 +91,37 @@ test('normalizes a Radarr release for the desktop client', () => {
     rejections: ['Not preferred'],
   }), {
     guid: 'g', indexerId: 7, title: 'Movie.2026.1080p.WEB-DL.x265', size: 1500,
+    source: 'Prowlarr', sourceGroup: 'default',
     seeders: 22, peers: 4, quality: 'WEBDL-1080p', resolution: 1080,
-    codec: 'H.265', rejected: true, rejections: ['Not preferred'],
+    codec: 'H.265', rejected: true, downloadable: true, rejections: ['Not preferred'],
   });
+});
+
+test('keeps cutoff-rejected releases manually downloadable but blocks imported duplicates', () => {
+  const cutoff = normalizeRelease({
+    guid: 'cutoff', indexerId: 2, title: 'Movie 1080p',
+    rejected: true, rejections: ['Existing file meets cutoff: Bluray-1080p'],
+  });
+  const duplicate = normalizeRelease({
+    guid: 'duplicate', indexerId: 2, title: 'Movie 2160p',
+    rejected: true, rejections: ['Has same torrent hash as a grabbed and imported release'],
+  });
+
+  assert.equal(cutoff.downloadable, true);
+  assert.equal(duplicate.downloadable, false);
+});
+
+test('marks releases from public-domain indexers without changing ordinary releases', () => {
+  const publicRelease = normalizeRelease({
+    guid: 'archive-guid', indexerId: 12, indexer: 'Internet Archive', title: 'Public Film 1080p', size: 100,
+  });
+  const ordinaryRelease = normalizeRelease({
+    guid: 'yts-guid', indexerId: 2, indexer: 'YTS', title: 'Film 1080p', size: 100,
+  });
+
+  assert.equal(publicRelease.source, 'Internet Archive');
+  assert.equal(publicRelease.sourceGroup, 'free_public_domain');
+  assert.equal(ordinaryRelease.sourceGroup, 'default');
 });
 
 test('keeps a manually selected Sonarr release actionable when only monitoring is missing', () => {
@@ -171,7 +228,21 @@ test('searches and normalizes Sonarr series by TVDB id', async () => {
     assert.equal(requestPath, '/series/lookup?term=batman');
     return [{ tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', remotePoster: 'poster.jpg', seasons: [{ seasonNumber: 1 }] }];
   };
-  assert.deepEqual(await media.searchSeries('batman'), [{ mediaType: 'series', tvdbId: 123, title: 'Batman', year: 2024, overview: 'Series', poster: 'poster.jpg', inLibrary: false, seasons: [{ seasonNumber: 1 }] }]);
+  assert.deepEqual(await media.searchSeries('batman'), [{ mediaType: 'series', tvdbId: 123, title: 'Batman', originalTitle: undefined, aliases: [], studios: [], networks: [], people: [], year: 2024, overview: 'Series', poster: 'poster.jpg', inLibrary: false, seasons: [{ seasonNumber: 1 }] }]);
+});
+
+test('waits briefly for Sonarr to populate episodes after adding a series', async () => {
+  const media = new MediaClients({ episodeRetryDelayMs: 0 });
+  media.ensureSeries = async () => ({ id: 77 });
+  let calls = 0;
+  media.arr = async (_service, requestPath) => {
+    assert.equal(requestPath, '/episode?seriesId=77');
+    calls += 1;
+    return calls === 1 ? [] : [{ id: 91, seasonNumber: 1, episodeNumber: 1, title: 'Pilot', hasFile: false }];
+  };
+  const episodes = await media.seriesEpisodes(123);
+  assert.equal(calls, 2);
+  assert.deepEqual(episodes, [{ episodeId: 91, seasonNumber: 1, episodeNumber: 1, title: 'Pilot', airDate: undefined, hasFile: false }]);
 });
 
 test('uses YTS releases without calling Sonarr fallback', async () => {
@@ -209,6 +280,250 @@ test('falls back to exact Sonarr season packs when YTS has no release', async ()
   const releases = await media.seriesReleases(123, { seasonNumber: 2 });
   assert.deepEqual(releases.map(item => item.title), ['Show S02 pack']);
   assert.equal(releases[0].source, 'EZTV');
+});
+
+test('merges YTS, EZTV, and Free & Public Domain TV releases when each source is available', async () => {
+  const media = new MediaClients({ tvProvider: { search: async () => [] } });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Archive Show', year: 2024 });
+  media.arr = async (_service, requestPath) => {
+    assert.equal(requestPath, '/release?seriesId=7&seasonNumber=1');
+    return [
+      { title: 'Archive Show S01 1080p', guid: 'g1', indexerId: 4, indexer: 'EZTV', fullSeason: true, seasonNumber: 1 },
+      { title: 'Archive Show S01 720p', guid: 'g2', indexerId: 12, indexer: 'Internet Archive', fullSeason: true, seasonNumber: 1 },
+    ];
+  };
+  media.tvProvider.search = async () => [{ title: 'Archive Show S01 2160p', source: 'YTS Official', sourceMode: 'yts' }];
+  media.tvProvider.normalizeSonarr = row => ({ title: row.title, source: row.indexer, sourceMode: 'prowlarr' });
+
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.source), ['YTS Official', 'EZTV', 'Internet Archive']);
+});
+
+test('keeps successful TV sources when Free & Public Domain fails', async () => {
+  const media = new MediaClients({ tvProvider: { search: async () => [] } });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.arr = async (_service, requestPath) => {
+    assert.equal(requestPath, '/release?seriesId=7&seasonNumber=1');
+    return [{ title: 'Show S01', guid: 'g1', indexerId: 4, indexer: 'EZTV', fullSeason: true, seasonNumber: 1 }];
+  };
+  media.tvProvider.normalizeSonarr = row => ({ title: row.title, source: row.indexer, sourceMode: 'prowlarr' });
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.source), ['EZTV']);
+});
+
+test('returns fast YTS TV releases without waiting for a stalled Sonarr source', async () => {
+  const media = new MediaClients({
+    sourceTimeoutMs: 5,
+    tvSourceTimeoutMs: 5,
+    tvProvider: {
+      search: async () => [{ title: 'Show S01 1080p', source: 'YTS Official', sourceMode: 'yts', rejected: false }],
+      normalizeSonarr: row => row,
+    },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.arr = async (_service, path) => {
+    if (path === '/release?seriesId=7&seasonNumber=1') return new Promise(() => {});
+    assert.fail(path);
+  };
+
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.source), ['YTS Official']);
+});
+
+test('keeps waiting for TV indexers after the direct YTS source fails', async () => {
+  const media = new MediaClients({
+    tvSourceTimeoutMs: 30,
+    tvProvider: {
+      search: async () => { throw new Error('yts_tv_provider_unavailable'); },
+      normalizeSonarr: row => ({ ...row, source: row.indexer }),
+    },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.defaultIndexerIds = async () => [4];
+  media.freeIndexerIds = async () => [];
+  media.arr = async () => {
+    await new Promise(resolve => setTimeout(resolve, 15));
+    return [{ title: 'Show S01', guid: 'g', indexerId: 4, indexer: 'Nyaa.si', fullSeason: true, seasonNumber: 1 }];
+  };
+
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.source), ['Nyaa.si']);
+});
+
+test('asks Sonarr once while Prowlarr searches all TV indexers concurrently', async () => {
+  const media = new MediaClients({
+    tvSourceTimeoutMs: 30,
+    tvProvider: { search: async () => [], normalizeSonarr: row => ({ ...row, source: row.indexer }) },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Anime Show', year: 2024 });
+  const requests = [];
+  media.arr = async (_service, requestPath) => {
+    requests.push(requestPath);
+    return [{ title: 'Anime Show S01', guid: 'land', indexerId: 21, indexer: 'Nyaa.land', fullSeason: true, seasonNumber: 1 }];
+  };
+
+  const releases = await media.seriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(releases.map(item => item.source), ['Nyaa.land']);
+  assert.deepEqual(requests, ['/release?seriesId=7&seasonNumber=1']);
+});
+
+test('asks Radarr once while Prowlarr searches all movie indexers concurrently', async () => {
+  const media = new MediaClients({ restrictDefaultIndexers: true });
+  media.ensureMovie = async () => ({ id: 7 });
+  const requests = [];
+  media.arr = async (_service, requestPath) => {
+    requests.push(requestPath);
+    return [
+      { title: 'Movie 1080p', guid: 'yts', indexerId: 2, indexer: 'YTS' },
+      { title: 'Movie 720p', guid: 'archive', indexerId: 12, indexer: 'Internet Archive' },
+    ];
+  };
+  const releases = await media.releases(603);
+  assert.deepEqual(releases.map(item => item.source), ['YTS', 'Internet Archive']);
+  assert.deepEqual(requests, ['/release?movieId=7']);
+});
+
+test('deduplicates the same movie release returned by multiple source searches', async () => {
+  const media = new MediaClients({ restrictDefaultIndexers: true });
+  media.ensureMovie = async () => ({ id: 7 });
+  media.defaultIndexerIds = async () => [2];
+  media.freeIndexerIds = async () => [12];
+  media.arr = async () => [{ title: 'Movie 1080p', guid: 'same', indexerId: 2, indexer: 'YTS (Prowlarr)' }];
+
+  const releases = await media.releases(603);
+  assert.equal(releases.length, 1);
+});
+
+test('deduplicates Nyaa mirrors returned by one Radarr interactive search', async () => {
+  const hash = 'a'.repeat(40);
+  const media = new MediaClients({ restrictDefaultIndexers: true });
+  media.ensureMovie = async () => ({ id: 7 });
+  const started = [];
+  media.arr = async (_service, requestPath) => {
+    started.push(requestPath);
+    return [
+      { title: 'Anime Movie 1080p', guid: `magnet:?xt=urn:btih:${hash}`, indexerId: 20, indexer: 'Nyaa.si', size: 100 },
+      { title: 'Anime Movie 1080p', guid: `https://nyaa.land/download/${hash}.torrent`, indexerId: 21, indexer: 'Nyaa.land', size: 100 },
+    ];
+  };
+
+  const releases = await media.releases(603);
+  assert.deepEqual(started, ['/release?movieId=7']);
+  assert.equal(releases.length, 1);
+});
+
+test('reports provider failure instead of pretending there are no movie releases', async () => {
+  const media = new MediaClients({ restrictDefaultIndexers: true, sourceTimeoutMs: 20 });
+  media.ensureMovie = async () => ({ id: 7 });
+  media.defaultIndexerIds = async () => [2];
+  media.freeIndexerIds = async () => [12];
+  media.arr = async () => { throw new Error('indexer offline'); };
+
+  await assert.rejects(media.releases(603), /release_sources_unavailable/);
+});
+
+test('returns idempotent success when a selected movie torrent already exists', async () => {
+  const hash = 'A'.repeat(40);
+  const media = new MediaClients({});
+  media.ensureMovie = async () => ({ id: 7 });
+  media.qbit = async requestPath => requestPath === '/torrents/info'
+    ? [{ hash: hash.toLowerCase() }]
+    : assert.fail('must not mutate qBittorrent');
+  media.arr = async () => assert.fail('must not ask Radarr to add a duplicate');
+
+  assert.deepEqual(await media.downloadRelease(603, {
+    guid: `https://yts.gg/torrent/download/${hash}`,
+    indexerId: 2,
+  }), { accepted: true, duplicate: true, hash: hash.toLowerCase() });
+});
+
+test('recovers when qBittorrent reports a duplicate during the Radarr add race', async () => {
+  const hash = 'B'.repeat(40).toLowerCase();
+  const media = new MediaClients({});
+  media.ensureMovie = async () => ({ id: 7 });
+  let checks = 0;
+  media.qbit = async () => ++checks === 1 ? [] : [{ hash }];
+  media.arr = async () => { throw new Error('500 qBittorrent 409 Conflict'); };
+
+  assert.deepEqual(await media.downloadRelease(603, {
+    guid: `https://yts.gg/torrent/download/${hash}`,
+    indexerId: 2,
+  }), { accepted: true, duplicate: true, hash });
+});
+
+test('recognizes Radarr indexers after Prowlarr appends its display suffix', async () => {
+  const media = new MediaClients({});
+  media.arr = async () => [
+    { id: 2, name: 'YTS (Prowlarr)' },
+    { id: 12, name: 'Internet Archive (Prowlarr)' },
+  ];
+
+  assert.deepEqual(await media.defaultIndexerIds('movie'), [2]);
+  assert.deepEqual(await media.freeIndexerIds('movie'), [12]);
+});
+
+test('reports Free & Public Domain source health without exposing Prowlarr configuration', async () => {
+  const media = new MediaClients({ tvProvider: {} });
+  media.prowlarr = async () => [
+    { id: 2, name: 'YTS', enable: true },
+    { id: 3, name: 'EZTV', enable: true },
+    { id: 12, name: 'Internet Archive', enable: true },
+    { id: 5, name: 'Tokyo Toshokan', enable: true },
+    { id: 20, name: 'Nyaa.si', enable: true },
+    { id: 21, name: 'Nyaa.land', enable: true },
+  ];
+  const sources = await media.downloadSources();
+  assert.deepEqual(sources, [
+    { id: 'yts-official', name: 'YTS Official', state: 'ready', scopes: ['movie', 'series'] },
+    { id: 'eztv', name: 'EZTV', state: 'ready', scopes: ['series'] },
+    { id: 'internet-archive', name: 'Internet Archive', state: 'ready', scopes: ['movie', 'series'] },
+    { id: 'tokyo-toshokan', name: 'Tokyo Toshokan', state: 'ready', scopes: ['series'] },
+    { id: 'nyaa-si', name: 'Nyaa.si', state: 'ready', scopes: ['movie', 'series'], endpoint: 'https://nyaa.si/' },
+    { id: 'nyaa-land', name: 'Nyaa.land', state: 'ready', scopes: ['movie', 'series'], endpoint: 'https://nyaa.land/' },
+    { id: 'public-domain-torrents', name: 'Public Domain Torrents', state: 'needs_manual_feed', scopes: ['movie'], reason: 'No compatible Prowlarr feed configured' },
+  ]);
+});
+
+test('reports both Nyaa indexers and keeps their Arr ids independently selectable', async () => {
+  const media = new MediaClients({});
+  media.prowlarr = async () => [
+    { id: 20, name: 'Nyaa.si', enable: true },
+    { id: 21, name: 'Nyaa.land', enable: true },
+  ];
+  media.arr = async () => [
+    { id: 120, name: 'Nyaa.si (Prowlarr)', enable: true },
+    { id: 121, name: 'Nyaa.land (Prowlarr)', enable: true },
+  ];
+
+  const sources = await media.downloadSources();
+  assert.equal(sources.find(source => source.id === 'nyaa-si').state, 'ready');
+  assert.equal(sources.find(source => source.id === 'nyaa-land').state, 'ready');
+  assert.deepEqual(await media.nyaaIndexerIds('movie'), { si: [120], land: [121] });
+  assert.deepEqual(await media.nyaaIndexerIds('series'), { si: [120], land: [121] });
+});
+
+test('reports a Nyaa.si Cloudflare challenge without exposing upstream HTML', async () => {
+  const media = new MediaClients({});
+  media.prowlarr = async requestPath => requestPath === '/indexer'
+    ? [{ id: 20, name: 'Nyaa.si', enable: true }, { id: 21, name: 'Nyaa.land', enable: true }]
+    : [{ indexerId: 20, mostRecentFailure: '<html>Just a moment... Cloudflare Turnstile</html>' }];
+
+  const sources = await media.downloadSources();
+  const nyaa = sources.find(source => source.id === 'nyaa-si');
+  assert.equal(nyaa.state, 'cloudflare_blocked');
+  assert.equal(nyaa.reason, 'Cloudflare challenge requires attention');
+  assert.doesNotMatch(JSON.stringify(nyaa), /<html>|Turnstile/i);
+  assert.equal(sources.find(source => source.id === 'nyaa-land').state, 'ready');
+});
+
+test('reports temporary Prowlarr source failures as degraded instead of disabled', async () => {
+  const media = new MediaClients({ tvProvider: {} });
+  media.prowlarr = async () => { throw new Error('temporary network failure'); };
+  const sources = await media.downloadSources();
+  assert.equal(sources.find(source => source.id === 'yts-official').state, 'degraded');
+  assert.equal(sources.find(source => source.id === 'eztv').state, 'degraded');
+  assert.equal(sources.find(source => source.id === 'internet-archive').state, 'degraded');
+  assert.equal(sources.find(source => source.id === 'tokyo-toshokan').state, 'degraded');
 });
 
 test('monitors only the selected episode then adds its verified magnet to qBittorrent', async () => {
@@ -277,13 +592,162 @@ test('normalizes the managed Radarr library and matches Jellyfin by path', async
   await fs.writeFile(video, 'video');
   await fs.writeFile(path.join(movieDir, 'The Batman.vi.srt'), 'subtitle');
   const media = new MediaClients({ libraryRoot: root, jellyfinApiKey: 'token' });
-  media.arr = async (_service, requestPath) => requestPath === '/movie' ? [{ id: 11, title: 'The Batman', year: 2022, path: movieDir, movieFile: { path: video, mediaInfo: { videoCodec: 'h264', audioCodec: 'aac' } } }] : [];
-  media.jellyfin = async () => ({ Items: [{ Id: 'jf-1', Path: video, UserData: { Played: true } }] });
+  media.arr = async (service, requestPath) => {
+    if (service === 'radarr' && requestPath === '/movie') return [{ id: 11, title: 'The Batman', year: 2022, path: movieDir, movieFile: { path: video, mediaInfo: { videoCodec: 'h264', audioCodec: 'aac' } } }];
+    if (service === 'sonarr' && requestPath === '/series') return [{ id: 21, title: 'Frieren', year: 2023, path: '/data/library/series/Frieren', statistics: { episodeFileCount: 28 }, images: [{ coverType: 'poster', remoteUrl: 'https://poster/series.jpg' }] }];
+    return [];
+  };
+  media.jellyfin = async () => ({ Items: [
+    { Id: 'jf-1', Path: video, UserData: { Played: true } },
+    { Id: 'jf-series', Path: '/data/library/series/Frieren', UserData: { Played: false } },
+  ] });
 
   const result = await media.library();
-  assert.equal(result.length, 1);
+  assert.equal(result.length, 2);
   assert.equal(result[0].jellyfinId, 'jf-1');
   assert.equal(result[0].subtitleCount, 1);
+  assert.deepEqual(result[1], {
+    mediaId: 21,
+    jellyfinId: 'jf-series',
+    title: 'Frieren',
+    year: 2023,
+    poster: 'https://poster/series.jpg',
+    path: '/data/library/series/Frieren',
+    watched: false,
+    playbackPositionTicks: 0,
+    episodeCount: 28,
+    type: 'series',
+  });
+});
+
+test('builds compact Vietnamese subtitle coverage by series and season', async () => {
+  const media = new MediaClients({});
+  media.bazarr = async requestPath => {
+    if (requestPath.startsWith('/movies')) return { data: [] };
+    if (requestPath === '/episodes?seriesid[]=21') return { data: [
+      { sonarrEpisodeId: 91, sonarrSeriesId: 21, season: 1, episode: 1, title: 'The Journey Ends', path: '/series/Frieren S01E01.mkv', missing_subtitles: [{ code2: 'en' }], subtitles: [{ code2: 'vi' }] },
+      { sonarrEpisodeId: 93, sonarrSeriesId: 21, season: 2, episode: 1, title: 'New Journey', path: '/series/Frieren S02E01.mkv', missing_subtitles: [{ code2: 'vi' }], subtitles: [{ code2: 'en' }] },
+    ] };
+    assert.fail(`unexpected Bazarr request ${requestPath}`);
+  };
+  media.arr = async (service, requestPath) => {
+    assert.equal(service, 'sonarr');
+    if (requestPath === '/series') return [{ id: 21, title: 'Frieren', year: 2023, statistics: { episodeFileCount: 2 }, images: [{ coverType: 'poster', remoteUrl: 'https://poster/series.jpg' }] }];
+    assert.fail(requestPath);
+  };
+
+  const result = await media.subtitleMedia();
+  assert.deepEqual(result, [{
+    mediaId: 21,
+    title: 'Frieren',
+    year: 2023,
+    poster: 'https://poster/series.jpg',
+    type: 'series',
+    episodeCount: 2,
+    viAvailable: 1,
+    viMissing: 1,
+    coverageDegraded: false,
+    seasons: [
+      { seasonNumber: 1, episodeCount: 1, viAvailable: 1, viMissing: 0 },
+      { seasonNumber: 2, episodeCount: 1, viAvailable: 0, viMissing: 1 },
+    ],
+  }]);
+});
+
+test('loads one season lazily and puts episodes missing Vietnamese first', async () => {
+  const media = new MediaClients({});
+  media.arr = async (service, requestPath) => {
+    assert.equal(service, 'sonarr');
+    if (requestPath === '/series/21') return { id: 21, title: 'Frieren', year: 2023, images: [{ coverType: 'poster', remoteUrl: 'https://poster/series.jpg' }] };
+    if (requestPath === '/episode?seriesId=21&includeEpisodeFile=true') return [
+      { id: 91, seasonNumber: 1, episodeNumber: 1, title: 'Has Vietnamese', hasFile: true, episodeFile: { path: '/series/Frieren S01E01.mkv' } },
+      { id: 92, seasonNumber: 1, episodeNumber: 2, title: 'Missing Vietnamese', hasFile: true, episodeFile: { path: '/series/Frieren S01E02.mkv' } },
+      { id: 93, seasonNumber: 2, episodeNumber: 1, title: 'Other season', hasFile: true, episodeFile: { path: '/series/Frieren S02E01.mkv' } },
+    ];
+    assert.fail(requestPath);
+  };
+  media.bazarr = async requestPath => {
+    assert.equal(requestPath, '/episodes?seriesid[]=21');
+    return { data: [
+      { sonarrEpisodeId: 91, missing_subtitles: [], subtitles: [{ code2: 'vi' }] },
+      { sonarrEpisodeId: 92, missing_subtitles: [{ code2: 'vi' }], subtitles: [{ code2: 'en' }] },
+    ] };
+  };
+
+  const result = await media.subtitleSeason(21, 1);
+  assert.deepEqual(result.map(item => [item.mediaId, item.hasVietnamese]), [[92, false], [91, true]]);
+  assert.equal(result[0].title, 'Frieren S01E02 • Missing Vietnamese');
+});
+
+test('keeps all Bazarr languages available for multi-provider episode results', async () => {
+  const media = new MediaClients({});
+  media.bazarr = async requestPath => {
+    assert.equal(requestPath, '/providers/episodes?episodeid=92');
+    return { data: [
+      { provider: 'opensubtitlescom', language: 'vi' },
+      { provider: 'gestdown', language: 'en' },
+    ] };
+  };
+  assert.equal((await media.searchAllEpisodeSubtitles(92)).data.length, 2);
+});
+
+test('searches one season and downloads the best Vietnamese subtitle for each missing episode', async () => {
+  const media = new MediaClients({});
+  const downloaded = [];
+  const refreshed = [];
+  media.subtitleSeason = async () => [
+    { mediaId: 91, hasVietnamese: true },
+    { mediaId: 92, hasVietnamese: false },
+    { mediaId: 93, hasVietnamese: false },
+    { mediaId: 94, hasVietnamese: false },
+  ];
+  media.searchEpisodeSubtitles = async episodeId => {
+    if (episodeId === 92) return { data: [
+      { language: 'vi', score: 70, provider: 'gestdown', downloadToken: 'low' },
+      { language: 'vi', score: 95, provider: 'opensubtitlescom', downloadToken: 'best' },
+    ] };
+    if (episodeId === 93) return { data: [] };
+    throw new Error('provider unavailable');
+  };
+  media.downloadEpisodeSubtitle = async (episodeId, subtitle) => downloaded.push([episodeId, subtitle.downloadToken]);
+  media.refreshEpisodeSubtitles = async episodeId => refreshed.push(episodeId);
+  media.refreshJellyfin = async () => refreshed.push('jellyfin');
+
+  const result = await media.searchSeasonSubtitles(21, 1);
+
+  assert.deepEqual(result, {
+    seriesId: 21,
+    seasonNumber: 1,
+    total: 4,
+    alreadyAvailable: 1,
+    downloaded: 1,
+    unavailable: 1,
+    failed: 1,
+  });
+  assert.deepEqual(downloaded, [[92, 'best']]);
+  assert.deepEqual(refreshed, [92, 'jellyfin']);
+});
+
+test('coalesces duplicate in-flight season subtitle batches', async () => {
+  const media = new MediaClients({});
+  let seasonCalls = 0;
+  let releaseSearch;
+  media.subtitleSeason = async () => {
+    seasonCalls++;
+    return [{ mediaId: 92, hasVietnamese: false }];
+  };
+  media.searchEpisodeSubtitles = () => new Promise(resolve => { releaseSearch = resolve; });
+  media.downloadEpisodeSubtitle = async () => null;
+  media.refreshEpisodeSubtitles = async () => null;
+  media.refreshJellyfin = async () => null;
+
+  const first = media.searchSeasonSubtitles(21, 1);
+  const second = media.searchSeasonSubtitles(21, 1);
+  await new Promise(resolve => setImmediate(resolve));
+  releaseSearch({ data: [{ language: 'vi', score: 80, downloadToken: 'token' }] });
+
+  assert.deepEqual(await first, await second);
+  assert.equal(seasonCalls, 1);
 });
 
 test('uploads and deletes only generated subtitle sidecars', async t => {

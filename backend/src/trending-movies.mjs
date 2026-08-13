@@ -61,7 +61,7 @@ export class JsonTrendingStore {
 }
 
 export class TrendingMovies {
-  constructor({ fetchPage, fetchFallback, store, limit = 40 }) {
+  constructor({ fetchPage, fetchFallback, store, limit = 180 }) {
     this.fetchPage = fetchPage;
     this.store = store;
     this.fetchFallback = fetchFallback;
@@ -101,7 +101,7 @@ export class TrendingMovies {
 
 export function createYtsPopularFetcher({ baseUrl, fetchImpl = fetch }) {
   return async () => {
-    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/api/v2/list_movies.json?limit=40&sort_by=download_count`, {
+    const response = await fetchImpl(`${baseUrl.replace(/\/$/, '')}/api/v2/list_movies.json?limit=80&sort_by=download_count`, {
       headers: { accept: 'application/json' }, signal: AbortSignal.timeout(8000),
     });
     if (!response.ok) throw new Error(`YTS discovery failed with ${response.status}`);

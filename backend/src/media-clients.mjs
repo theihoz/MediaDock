@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { decodeSubtitleUpload, ImportStatusCache, normalizeLibraryMovie, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
+import { decodeSubtitleUpload, ImportStatusCache, normalizeLibraryMovie, normalizeLibrarySeries, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
 import { matchesTvTitleScope } from './yts-official-tv.mjs';
 
 export function extractApiKey(text) {
@@ -19,9 +19,12 @@ export function normalizeRelease(value) {
   const codec = /(?:x|h)[ ._-]?265|hevc/i.test(title) ? 'H.265' : /av1/i.test(title) ? 'AV1' : /(?:x|h)[ ._-]?264|avc/i.test(title) ? 'H.264' : 'Unknown';
   const rejections = value.rejections ?? [];
   const onlyNeedsMonitoring = rejections.length > 0 && rejections.every(reason => /^Episode wasn't requested:/i.test(reason));
+  const duplicateImported = rejections.some(reason => /same torrent hash as a grabbed and imported release/i.test(reason));
   return {
     guid: value.guid,
     indexerId: value.indexerId,
+    source: value.indexer ?? value.indexerName ?? 'Prowlarr',
+    sourceGroup: /^(Internet Archive|Public Domain Torrents)(?:\s*\([^)]*\))?$/i.test(value.indexer ?? value.indexerName ?? '') ? 'free_public_domain' : 'default',
     title,
     size: value.size ?? 0,
     seeders: value.seeders ?? 0,
@@ -30,6 +33,7 @@ export function normalizeRelease(value) {
     resolution: value.quality?.quality?.resolution ?? 0,
     codec,
     rejected: onlyNeedsMonitoring ? false : Boolean(value.rejected ?? rejections.length),
+    downloadable: Boolean(value.guid) && !duplicateImported,
     rejections,
   };
 }
@@ -114,6 +118,40 @@ export function normalizeSubtitleEpisode(value) {
   };
 }
 
+function subtitleCode(value) {
+  return String(value?.code2 ?? value?.language?.code2 ?? value?.language ?? value ?? '').toLowerCase();
+}
+
+function hasVietnameseSubtitle(value) {
+  return (value?.subtitles ?? []).some(item => subtitleCode(item) === 'vi');
+}
+
+function summarizeSubtitleSeries(series, episodes, coverageDegraded = false) {
+  const seasonMap = new Map();
+  for (const episode of episodes) {
+    const seasonNumber = Number(episode.season ?? episode.seasonNumber ?? 0);
+    if (seasonNumber <= 0) continue;
+    const season = seasonMap.get(seasonNumber) ?? { seasonNumber, episodeCount: 0, viAvailable: 0, viMissing: 0 };
+    season.episodeCount += 1;
+    if (hasVietnameseSubtitle(episode)) season.viAvailable += 1;
+    else season.viMissing += 1;
+    seasonMap.set(seasonNumber, season);
+  }
+  const seasons = [...seasonMap.values()].sort((left, right) => left.seasonNumber - right.seasonNumber);
+  return {
+    mediaId: series.id,
+    title: series.title,
+    year: Number(series.year || 0),
+    poster: series.images?.find(image => image.coverType === 'poster')?.remoteUrl ?? null,
+    type: 'series',
+    episodeCount: seasons.reduce((sum, season) => sum + season.episodeCount, 0),
+    viAvailable: seasons.reduce((sum, season) => sum + season.viAvailable, 0),
+    viMissing: seasons.reduce((sum, season) => sum + season.viMissing, 0),
+    coverageDegraded,
+    seasons,
+  };
+}
+
 function buildEpisodeSubtitleDownloadQuery(episodeId, value) {
   if (!value.provider || !value.subtitle) throw new Error('invalid subtitle selection');
   return new URLSearchParams({
@@ -122,11 +160,51 @@ function buildEpisodeSubtitleDownloadQuery(episodeId, value) {
   }).toString();
 }
 
+function infoHashFromReleaseGuid(guid) {
+  const match = String(guid ?? '').match(/(?:download\/|btih:)([a-fA-F0-9]{40})(?:\b|$)/i);
+  return match?.[1]?.toLowerCase() ?? null;
+}
+
 async function jsonRequest(url, options = {}) {
   const response = await fetch(url, options);
   const text = await response.text();
   if (!response.ok) throw new Error(`${response.status} ${text.slice(0, 240)}`);
   return text ? JSON.parse(text) : null;
+}
+
+async function partialSourceResults(promises, timeoutMs) {
+  const completed = [];
+  let successfulSources = 0;
+  const tracked = promises.map(promise => Promise.resolve(promise)
+    .then(value => {
+      successfulSources += 1;
+      completed.push(...value);
+    })
+    .catch(() => {}));
+  await Promise.race([
+    Promise.all(tracked),
+    new Promise(resolve => setTimeout(resolve, timeoutMs)),
+  ]);
+  if (successfulSources === 0) throw new Error('release_sources_unavailable');
+  return completed;
+}
+
+async function withSourceTimeout(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('source_timeout')), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function releaseIdentity(release) {
+  const hash = infoHashFromReleaseGuid(release.guid);
+  if (hash) return `hash:${hash}`;
+  return `fallback:${String(release.title ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')}:${release.size ?? 0}`;
 }
 
 export class ReleaseSearchCache {
@@ -138,13 +216,17 @@ export class ReleaseSearchCache {
     this.inFlight = new Map();
   }
 
-  async get(key, search) {
+  async get(key, search, { force = false } = {}) {
     const cached = this.values.get(key);
-    if (cached && cached.expiresAt > this.now()) return cached.value;
+    if (!force && cached && cached.expiresAt > this.now()) return cached.value;
     if (this.inFlight.has(key)) return this.inFlight.get(key);
 
     const pending = this.withTimeout(search()).then(value => {
-      this.values.set(key, { value, expiresAt: this.now() + this.ttlMs });
+      if (!Array.isArray(value) || value.length > 0) {
+        this.values.set(key, { value, expiresAt: this.now() + this.ttlMs });
+      } else {
+        this.values.delete(key);
+      }
       return value;
     }).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, pending);
@@ -171,8 +253,17 @@ export class MediaClients {
     this.config = config;
     this.tvProvider = config.tvProvider;
     this.qbitCookie = null;
-    this.releaseCache = config.releaseCache ?? new ReleaseSearchCache();
+    this.sourceTimeoutMs = config.sourceTimeoutMs ?? 8000;
+    this.seasonSubtitleSearches = new Map();
+    this.tvSourceTimeoutMs = config.tvSourceTimeoutMs ?? 30000;
+    this.nyaaSiTimeoutMs = config.nyaaSiTimeoutMs ?? 12000;
+    this.nyaaLandTimeoutMs = config.nyaaLandTimeoutMs ?? 8000;
+    this.episodeRetryDelayMs = config.episodeRetryDelayMs ?? 500;
+    this.releaseCache = config.releaseCache ?? new ReleaseSearchCache({
+      timeoutMs: Math.max(15000, this.tvSourceTimeoutMs + 1000),
+    });
     this.importStatusCache = config.importStatusCache ?? new ImportStatusCache({ lookup: (hash, category) => this.isImported(hash, category) });
+    this.freeIndexerIdCache = new Map();
   }
 
   arrKey(name) { return apiKeyFrom(this.config[`${name}Config`]); }
@@ -185,13 +276,84 @@ export class MediaClients {
     });
   }
 
+  async prowlarr(path, options = {}) {
+    return jsonRequest(`${this.config.prowlarrUrl}/api/v1${path}`, {
+      ...options,
+      headers: { 'x-api-key': apiKeyFrom(this.config.prowlarrConfig), 'content-type': 'application/json', ...(options.headers ?? {}) },
+    });
+  }
+
+  async downloadSources() {
+    let indexers;
+    let statuses = [];
+    try {
+      const response = await this.prowlarr('/indexer');
+      indexers = Array.isArray(response) ? response : Array.isArray(response?.value) ? response.value : [];
+      try {
+        const statusResponse = await this.prowlarr('/indexerstatus');
+        statuses = Array.isArray(statusResponse) ? statusResponse : Array.isArray(statusResponse?.value) ? statusResponse.value : [];
+      } catch {}
+    } catch {
+      indexers = null;
+    }
+    const detailsFor = (name, directAvailable = false) => {
+      if (!indexers) return { state: 'degraded' };
+      const indexer = indexers.find(item => item.name === name);
+      if (!indexer?.enable && !directAvailable) return { state: 'disabled' };
+      const status = statuses.find(item => Number(item.indexerId) === Number(indexer?.id));
+      const failure = String(status?.mostRecentFailure ?? status?.errorMessage ?? '');
+      if (/cloudflare|turnstile|just a moment/i.test(failure)) {
+        return { state: 'cloudflare_blocked', reason: 'Cloudflare challenge requires attention' };
+      }
+      if (failure) return { state: 'degraded', reason: 'Indexer is temporarily unavailable' };
+      return { state: 'ready' };
+    };
+    return [
+      { id: 'yts-official', name: 'YTS Official', ...detailsFor('YTS', Boolean(this.tvProvider)), scopes: ['movie', 'series'] },
+      { id: 'eztv', name: 'EZTV', ...detailsFor('EZTV'), scopes: ['series'] },
+      { id: 'internet-archive', name: 'Internet Archive', ...detailsFor('Internet Archive'), scopes: ['movie', 'series'] },
+      { id: 'tokyo-toshokan', name: 'Tokyo Toshokan', ...detailsFor('Tokyo Toshokan'), scopes: ['series'] },
+      { id: 'nyaa-si', name: 'Nyaa.si', ...detailsFor('Nyaa.si'), scopes: ['movie', 'series'], endpoint: 'https://nyaa.si/' },
+      { id: 'nyaa-land', name: 'Nyaa.land', ...detailsFor('Nyaa.land'), scopes: ['movie', 'series'], endpoint: 'https://nyaa.land/' },
+      { id: 'public-domain-torrents', name: 'Public Domain Torrents', state: 'needs_manual_feed', scopes: ['movie'], reason: 'No compatible Prowlarr feed configured' },
+    ];
+  }
+
+  async freeIndexerIds(type) {
+    const service = type === 'series' ? 'sonarr' : 'radarr';
+    const cacheKey = `${service}:free-public-domain`;
+    const cached = this.freeIndexerIdCache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return cached.ids;
+    const permitted = type === 'series' ? ['Internet Archive'] : ['Internet Archive', 'Public Domain Torrents'];
+    const rows = await this.arr(service, '/indexer');
+    const ids = rows.filter(row => permitted.some(name => String(row.name ?? '').startsWith(name)) && row.enable !== false).map(row => Number(row.id)).filter(Number.isInteger);
+    this.freeIndexerIdCache.set(cacheKey, { ids, expiresAt: Date.now() + 5 * 60 * 1000 });
+    return ids;
+  }
+
+  async defaultIndexerIds(type) {
+    const service = type === 'series' ? 'sonarr' : 'radarr';
+    const permitted = type === 'series' ? ['EZTV', 'Tokyo Toshokan'] : ['YTS'];
+    const rows = await this.arr(service, '/indexer');
+    return rows.filter(row => permitted.some(name => String(row.name ?? '').startsWith(name)) && row.enable !== false).map(row => Number(row.id)).filter(Number.isInteger);
+  }
+
+  async nyaaIndexerIds(type) {
+    const service = type === 'series' ? 'sonarr' : 'radarr';
+    const rows = await this.arr(service, '/indexer');
+    const idsFor = name => rows
+      .filter(row => String(row.name ?? '').startsWith(name) && row.enable !== false)
+      .map(row => Number(row.id)).filter(Number.isInteger);
+    return { si: idsFor('Nyaa.si'), land: idsFor('Nyaa.land') };
+  }
+
   async searchMovies(term) {
     const items = await this.arr('radarr', `/movie/lookup?term=${encodeURIComponent(term)}`);
-    return items.map(item => ({ tmdbId: item.tmdbId, title: item.title, year: item.year, overview: item.overview, poster: item.remotePoster, runtime: item.runtime, genres: item.genres ?? [], inLibrary: Boolean(item.id) }));
+    return items.map(item => ({ tmdbId: item.tmdbId, title: item.title, originalTitle: item.originalTitle, aliases: (item.alternativeTitles ?? []).map(value => value.title).filter(Boolean), studios: item.studio ? [item.studio] : [], people: [], year: item.year, overview: item.overview, poster: item.remotePoster, runtime: item.runtime, genres: item.genres ?? [], inLibrary: Boolean(item.id) }));
   }
 
   normalizeSeries(item) {
-    return { mediaType: 'series', tvdbId: item.tvdbId, title: item.title, year: item.year, overview: item.overview, poster: item.remotePoster, inLibrary: Boolean(item.id), seasons: item.seasons ?? [] };
+    return { mediaType: 'series', tvdbId: item.tvdbId, title: item.title, originalTitle: item.originalTitle, aliases: (item.alternateTitles ?? []).map(value => value.title).filter(Boolean), studios: item.studio ? [item.studio] : [], networks: item.network ? [item.network] : [], people: [], year: item.year, overview: item.overview, poster: item.remotePoster, inLibrary: Boolean(item.id), seasons: item.seasons ?? [] };
   }
 
   async searchSeries(term) {
@@ -216,10 +378,16 @@ export class MediaClients {
 
   async seriesEpisodes(tvdbId) {
     const series = await this.ensureSeries(tvdbId);
-    return (await this.arr('sonarr', `/episode?seriesId=${series.id}`)).map(item => ({ episodeId: item.id, seasonNumber: item.seasonNumber, episodeNumber: item.episodeNumber, title: item.title, airDate: item.airDate, hasFile: Boolean(item.hasFile) }));
+    let rows = [];
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      rows = await this.arr('sonarr', `/episode?seriesId=${series.id}`);
+      if (rows.length || attempt === 9) break;
+      await new Promise(resolve => setTimeout(resolve, this.episodeRetryDelayMs));
+    }
+    return rows.map(item => ({ episodeId: item.id, seasonNumber: item.seasonNumber, episodeNumber: item.episodeNumber, title: item.title, airDate: item.airDate, hasFile: Boolean(item.hasFile) }));
   }
 
-  async seriesReleases(tvdbId, selection) {
+  async seriesReleases(tvdbId, selection, { force = false } = {}) {
     const series = await this.ensureSeries(tvdbId);
     const cacheKey = selection.episodeId ? `series:${tvdbId}:episode:${selection.episodeId}` : `series:${tvdbId}:season:${selection.seasonNumber}`;
     return this.releaseCache.get(cacheKey, async () => {
@@ -231,24 +399,22 @@ export class MediaClients {
       } else {
         scope = { tvdbId: Number(tvdbId), title: series.title, year: series.year, seasonNumber: Number(selection.seasonNumber) };
       }
-      try {
-        const yts = await this.tvProvider.search(scope);
-        if (yts.length) return yts;
-      } catch {}
-      try {
-        const path = selection.episodeId
-          ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
-          : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
+      const path = selection.episodeId
+        ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
+        : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
+      const normalizeArr = async () => {
         let rows = await this.arr('sonarr', path);
         rows = rows.filter(row => row.guid && Number.isInteger(Number(row.indexerId)) && matchesTvTitleScope(row.title ?? '', scope));
         rows.sort((left, right) => Number(!/EZTV/i.test(left.indexer ?? left.indexerName ?? '')) - Number(!/EZTV/i.test(right.indexer ?? right.indexerName ?? '')));
-        const releases = rows.map(row => this.tvProvider.normalizeSonarr(row, scope));
-        if (releases.length) return releases;
-      } catch (error) {
-        const failed = new Error('tv_provider_unavailable'); failed.code = 'tv_provider_unavailable'; throw failed;
-      }
+        return rows.map(row => ({ ...this.tvProvider.normalizeSonarr(row, scope), sourceGroup: 'default' }));
+      };
+      const releases = await partialSourceResults([
+        this.tvProvider.search(scope),
+        normalizeArr(),
+      ], this.tvSourceTimeoutMs);
+      if (releases.length) return [...new Map(releases.map(release => [releaseIdentity(release), release])).values()];
       const unavailable = new Error('tv_release_unavailable'); unavailable.code = 'tv_release_unavailable'; throw unavailable;
-    });
+    }, { force });
   }
 
   async downloadSeriesRelease(tvdbId, selection) {
@@ -312,16 +478,40 @@ export class MediaClients {
     return this.arr('radarr', '/movie', { method: 'POST', body: JSON.stringify({ ...movie, qualityProfileId: profiles[0]?.id, rootFolderPath: '/data/library/movies', monitored: false, addOptions: { searchForMovie: false } }) });
   }
 
-  async releases(tmdbId) {
-    return this.releaseCache.get(String(tmdbId), async () => {
+  async releases(tmdbId, { force = false } = {}) {
+    return this.releaseCache.get(`${tmdbId}`, async () => {
       const movie = await this.ensureMovie(tmdbId);
-      return (await this.arr('radarr', `/release?movieId=${movie.id}`)).map(normalizeRelease);
-    });
+      const search = async () => (await this.arr('radarr', `/release?movieId=${movie.id}`)).map(normalizeRelease);
+      const releases = await partialSourceResults([
+        search(),
+      ], this.sourceTimeoutMs);
+      return [...new Map(releases.map(release => [releaseIdentity(release), release])).values()];
+    }, { force });
   }
 
   async downloadRelease(tmdbId, selection) {
     await this.ensureMovie(tmdbId);
-    return this.arr('radarr', '/release', { method: 'POST', body: JSON.stringify({ guid: selection.guid, indexerId: selection.indexerId }) });
+    const infoHash = infoHashFromReleaseGuid(selection.guid);
+    if (infoHash) {
+      const torrents = await this.qbit('/torrents/info');
+      if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === infoHash)) {
+        return { accepted: true, duplicate: true, hash: infoHash };
+      }
+    }
+    try {
+      await this.arr('radarr', '/release', { method: 'POST', body: JSON.stringify({ guid: selection.guid, indexerId: selection.indexerId }) });
+    } catch (error) {
+      if (infoHash) {
+        const torrents = await this.qbit('/torrents/info');
+        if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === infoHash)) {
+          return { accepted: true, duplicate: true, hash: infoHash };
+        }
+      }
+      const rejected = new Error('download_client_rejected');
+      rejected.cause = error;
+      throw rejected;
+    }
+    return { accepted: true, duplicate: false, hash: infoHash };
   }
 
   async qbitLogin() {
@@ -377,15 +567,106 @@ export class MediaClients {
   }
   async subtitles(radarrId) { return this.bazarr(`/movies?radarrid[]=${encodeURIComponent(radarrId)}`); }
   async subtitleMedia() {
-    const [movies, episodes] = await Promise.all([
+    const [movies, series] = await Promise.all([
       this.bazarr('/movies?start=0&length=-1'),
-      this.bazarr('/episodes?start=0&length=-1').catch(() => []),
+      this.arr('sonarr', '/series').catch(() => []),
     ]);
+    const seriesGroups = await Promise.all((series ?? [])
+      .filter(item => Number(item.statistics?.episodeFileCount ?? 0) > 0)
+      .map(async item => {
+      try {
+        const result = await this.bazarr(`/episodes?seriesid[]=${encodeURIComponent(item.id)}`);
+        const rows = (result?.data ?? result ?? []).filter(episode => episode.path);
+        if (rows.length) return summarizeSubtitleSeries(item, rows, false);
+      } catch {}
+      const rows = await this.arr('sonarr', `/episode?seriesId=${encodeURIComponent(item.id)}&includeEpisodeFile=true`).catch(() => []);
+      const imported = rows.filter(episode => episode.hasFile && episode.episodeFile?.path);
+      return summarizeSubtitleSeries(item, imported, true);
+    }));
     return [
       ...(movies?.data ?? movies ?? []).map(normalizeSubtitleMedia),
-      ...(episodes?.data ?? episodes ?? []).map(normalizeSubtitleEpisode),
+      ...seriesGroups.filter(item => item.episodeCount > 0),
     ];
   }
+
+  async subtitleSeason(seriesId, seasonNumber) {
+    const [series, episodes, bazarrResult] = await Promise.all([
+      this.arr('sonarr', `/series/${encodeURIComponent(seriesId)}`),
+      this.arr('sonarr', `/episode?seriesId=${encodeURIComponent(seriesId)}&includeEpisodeFile=true`),
+      this.bazarr(`/episodes?seriesid[]=${encodeURIComponent(seriesId)}`).catch(() => ({ data: [] })),
+    ]);
+    const bazarrById = new Map((bazarrResult?.data ?? bazarrResult ?? []).map(item => [Number(item.sonarrEpisodeId), item]));
+    const poster = series.images?.find(image => image.coverType === 'poster')?.remoteUrl ?? null;
+    return episodes
+      .filter(episode => episode.hasFile && episode.episodeFile?.path && Number(episode.seasonNumber) === Number(seasonNumber))
+      .map(episode => ({
+        ...normalizeSubtitleEpisode({
+          sonarrEpisodeId: episode.id,
+          seriesTitle: series.title,
+          episodeTitle: episode.title,
+          seasonNumber: episode.seasonNumber,
+          episodeNumber: episode.episodeNumber,
+          year: series.year,
+          path: episode.episodeFile.path,
+          poster,
+        }),
+        hasVietnamese: hasVietnameseSubtitle(bazarrById.get(Number(episode.id))),
+        episodeNumber: Number(episode.episodeNumber),
+        seasonNumber: Number(episode.seasonNumber),
+      }))
+      .sort((left, right) => Number(left.hasVietnamese) - Number(right.hasVietnamese) || left.episodeNumber - right.episodeNumber);
+  }
+
+  async searchSeasonSubtitles(seriesId, seasonNumber) {
+    const numericSeriesId = Number(seriesId);
+    const numericSeasonNumber = Number(seasonNumber);
+    const key = `${numericSeriesId}:${numericSeasonNumber}`;
+    if (this.seasonSubtitleSearches.has(key)) return this.seasonSubtitleSearches.get(key);
+
+    const pending = this.#searchSeasonSubtitles(numericSeriesId, numericSeasonNumber)
+      .finally(() => this.seasonSubtitleSearches.delete(key));
+    this.seasonSubtitleSearches.set(key, pending);
+    return pending;
+  }
+
+  async #searchSeasonSubtitles(seriesId, seasonNumber) {
+    const episodes = await this.subtitleSeason(seriesId, seasonNumber);
+    const missing = episodes.filter(episode => !episode.hasVietnamese);
+    const summary = {
+      seriesId,
+      seasonNumber,
+      total: episodes.length,
+      alreadyAvailable: episodes.length - missing.length,
+      downloaded: 0,
+      unavailable: 0,
+      failed: 0,
+    };
+    let cursor = 0;
+    const worker = async () => {
+      while (cursor < missing.length) {
+        const episode = missing[cursor++];
+        try {
+          const searchResult = await this.searchEpisodeSubtitles(episode.mediaId, 'vi');
+          const candidates = [...(searchResult?.data ?? searchResult ?? [])]
+            .sort((left, right) => Number(right.score ?? 0) - Number(left.score ?? 0));
+          const best = candidates[0];
+          if (!best) {
+            summary.unavailable++;
+            continue;
+          }
+          await this.downloadEpisodeSubtitle(episode.mediaId, best);
+          await this.refreshEpisodeSubtitles(episode.mediaId).catch(() => null);
+          summary.downloaded++;
+        } catch {
+          summary.failed++;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(4, missing.length) }, worker));
+    if (summary.downloaded > 0) await this.refreshJellyfin().catch(() => null);
+    return summary;
+  }
+
   async subtitleMovie(radarrId) {
     const result = await this.subtitles(radarrId);
     const movie = (result?.data ?? result ?? [])[0];
@@ -396,6 +677,9 @@ export class MediaClients {
     const result = await this.bazarr(`/providers/movies?radarrid=${encodeURIComponent(radarrId)}`);
     if (Array.isArray(result)) return filterSubtitleResults(result, language);
     return { ...result, data: filterSubtitleResults(result?.data ?? [], language) };
+  }
+  async searchAllSubtitles(radarrId) {
+    return this.bazarr(`/providers/movies?radarrid=${encodeURIComponent(radarrId)}`);
   }
   async downloadSubtitle(radarrId, value) {
     return this.bazarr(`/providers/movies?${buildSubtitleDownloadQuery(radarrId, value)}`, { method: 'POST', body: '{}' });
@@ -410,6 +694,9 @@ export class MediaClients {
     const result = await this.bazarr(`/providers/episodes?episodeid=${encodeURIComponent(episodeId)}`);
     if (Array.isArray(result)) return filterSubtitleResults(result, language);
     return { ...result, data: filterSubtitleResults(result?.data ?? [], language) };
+  }
+  async searchAllEpisodeSubtitles(episodeId) {
+    return this.bazarr(`/providers/episodes?episodeid=${encodeURIComponent(episodeId)}`);
   }
   async downloadEpisodeSubtitle(episodeId, value) {
     return this.bazarr(`/providers/episodes?${buildEpisodeSubtitleDownloadQuery(episodeId, value)}`, { method: 'POST', body: '{}' });
@@ -490,12 +777,20 @@ export class MediaClients {
   }
 
   async library() {
-    const movies = await this.arr('radarr', '/movie');
-    const jellyfin = await this.jellyfin('/Items?Recursive=true&IncludeItemTypes=Movie&Fields=Overview,Path,UserData,ProviderIds') ?? { Items: [] };
-    return Promise.all(movies.filter(movie => movie.hasFile !== false && movie.movieFile?.path).map(async movie => {
+    const [movies, series, jellyfin] = await Promise.all([
+      this.arr('radarr', '/movie'),
+      this.arr('sonarr', '/series').catch(() => []),
+      this.jellyfin('/Items?Recursive=true&IncludeItemTypes=Movie,Series&Fields=Overview,Path,UserData,ProviderIds') ?? { Items: [] },
+    ]);
+    const movieItems = await Promise.all(movies.filter(movie => movie.hasFile !== false && movie.movieFile?.path).map(async movie => {
       const item = (jellyfin.Items ?? []).find(value => value.Path === movie.movieFile.path);
       const subtitles = await this.localSubtitlesForMovie(movie);
       return normalizeLibraryMovie(movie, item, subtitles.length);
     }));
+    const seriesItems = series.filter(item => Number(item.statistics?.episodeFileCount ?? 0) > 0).map(item => {
+      const jellyfinItem = (jellyfin.Items ?? []).find(value => value.Path === item.path);
+      return normalizeLibrarySeries(item, jellyfinItem);
+    });
+    return [...movieItems, ...seriesItems];
   }
 }
