@@ -168,9 +168,29 @@ class LibraryApi extends Api {
 class SeriesApi extends Api {
   SeriesApi() : super(const LocalConfig());
   Object? downloadBody;
+  var trendingCalls = 0;
   @override
   Future<dynamic> gateway(String path,
       {String method = 'GET', Object? body}) async {
+    if (path == '/v1/series/trending') {
+      trendingCalls++;
+      return {
+        'items': [
+          {
+            'mediaType': 'series',
+            'providerId': 88,
+            'tvdbId': null,
+            'title': 'Trending Show',
+            'year': 2024,
+            'overview': 'Trending overview',
+            'poster': null,
+            'rating': 8.5,
+          }
+        ],
+        'source': 'popular',
+        'stale': false,
+      };
+    }
     if (path.startsWith('/v1/series/search')) {
       return [
         {
@@ -386,6 +406,10 @@ void main() {
         .pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
     await tester.tap(find.text('TV Show'));
     await tester.pumpAndSettle();
+    expect(api.trendingCalls, 1);
+    expect(find.text('Đang thịnh hành'), findsOneWidget);
+    expect(find.text('Phổ biến trên YTS Official'), findsOneWidget);
+    expect(find.text('Trending Show (2024)'), findsOneWidget);
     await tester.enterText(find.byType(TextField), 'Test');
     await tester.tap(find.text('Tìm'));
     await tester.pumpAndSettle();
@@ -398,5 +422,19 @@ void main() {
     await tester.pumpAndSettle();
     expect(api.downloadBody,
         {'downloadToken': 'opaque-token', 'seasonNumber': 1});
+  });
+
+  testWidgets('clearing TV Show search restores trending', (tester) async {
+    final api = SeriesApi();
+    await tester.pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
+    await tester.tap(find.text('TV Show'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField), 'Test');
+    await tester.tap(find.text('Tìm'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byIcon(Icons.clear));
+    await tester.pumpAndSettle();
+    expect(api.trendingCalls, 2);
+    expect(find.text('Đang thịnh hành'), findsOneWidget);
   });
 }

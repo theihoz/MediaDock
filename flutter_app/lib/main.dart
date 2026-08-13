@@ -705,12 +705,36 @@ class SeriesSearchPage extends StatefulWidget {
 
 class _SeriesSearchPageState extends State<SeriesSearchPage> {
   final query = TextEditingController();
-  List<dynamic> series = [], episodes = [], releases = [];
+  List<dynamic> series = [], trending = [], episodes = [], releases = [];
   Map<String, dynamic>? selected;
   int? selectedSeason;
   int? releaseEpisodeId;
   bool busy = false;
+  bool showingSearch = false;
+  bool trendingStale = false;
+  String trendingSource = 'unavailable';
   String? error;
+
+  @override
+  void initState() {
+    super.initState();
+    loadTrending();
+  }
+
+  Future<void> loadTrending() async {
+    setState(() { busy = true; error = null; showingSearch = false; });
+    try {
+      final result = await widget.api.gateway('/v1/series/trending');
+      if (!mounted) return;
+      setState(() {
+        trending = result is List ? result : (result['items'] ?? []);
+        trendingStale = result is Map && result['stale'] == true;
+        trendingSource = result is Map ? '${result['source'] ?? 'unavailable'}' : 'unavailable';
+      });
+    } catch (_) {
+      if (mounted) setState(() { trending = []; error = 'Chưa tải được TV Show thịnh hành'; });
+    } finally { if (mounted) setState(() => busy = false); }
+  }
 
   @override
   void dispose() {
@@ -720,11 +744,12 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
 
   Future<void> search() async {
     final term = query.text.trim();
-    if (term.isEmpty) return;
+    if (term.isEmpty) return loadTrending();
     setState(() {
       busy = true;
       error = null;
       selected = null;
+      showingSearch = true;
     });
     try {
       final value = await widget.api
@@ -745,8 +770,16 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
       releases = [];
     });
     try {
+      var target = item;
+      if ((item['tvdbId'] ?? 0) == 0) {
+        final matches = await widget.api.gateway('/v1/series/search?q=${Uri.encodeQueryComponent(item['title'])}');
+        final exact = (matches as List).where((candidate) => candidate['year'] == item['year']).toList();
+        if (exact.isEmpty) throw Exception('Không ánh xạ được TV Show sang Sonarr');
+        target = Map<String, dynamic>.from(exact.first);
+        if (mounted) setState(() => selected = target);
+      }
       final value =
-          await widget.api.gateway('/v1/series/${item['tvdbId']}/episodes');
+          await widget.api.gateway('/v1/series/${target['tvdbId']}/episodes');
       if (!mounted) return;
       final values = value as List;
       final seasons = values
@@ -823,10 +856,19 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
           Expanded(
               child: TextField(
                   controller: query,
+                  onChanged: (_) => setState(() {}),
                   onSubmitted: (_) => search(),
-                  decoration: const InputDecoration(
+                  decoration: InputDecoration(
                       labelText: 'Tên TV show',
-                      prefixIcon: Icon(Icons.search)))),
+                      prefixIcon: const Icon(Icons.search),
+                      suffixIcon: query.text.isEmpty
+                          ? null
+                          : IconButton(
+                              onPressed: () {
+                                query.clear();
+                                loadTrending();
+                              },
+                              icon: const Icon(Icons.clear))))),
           const SizedBox(width: 12),
           FilledButton(
               onPressed: busy ? null : search, child: const Text('Tìm'))
@@ -835,12 +877,32 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
         if (error != null)
           Text(error!,
               style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        if (!busy)
+          Align(
+              alignment: Alignment.centerLeft,
+              child: Padding(
+                  padding: const EdgeInsets.symmetric(vertical: 10),
+                  child: Row(children: [
+                    Text(showingSearch ? 'Kết quả tìm kiếm' : 'Đang thịnh hành',
+                        style: Theme.of(context).textTheme.titleLarge),
+                    if (trendingStale && !showingSearch)
+                      const Padding(
+                          padding: EdgeInsets.only(left: 10),
+                          child: Chip(label: Text('Dữ liệu gần nhất'))),
+                    if (!trendingStale && !showingSearch && trendingSource == 'popular')
+                      const Padding(
+                          padding: EdgeInsets.only(left: 10),
+                          child: Chip(label: Text('Phổ biến trên YTS Official'))),
+                  ]))),
         Expanded(
-            child: series.isEmpty
-                ? const Center(
-                    child: Text('Nhập tên TV show để tìm qua Sonarr'))
+            child: (showingSearch ? series : trending).isEmpty
+                ? Center(child: Column(mainAxisSize: MainAxisSize.min, children: [
+                    Text(showingSearch ? 'Không tìm thấy TV Show' : 'Chưa tải được TV Show thịnh hành'),
+                    const SizedBox(height: 10),
+                    OutlinedButton.icon(onPressed: showingSearch ? search : loadTrending, icon: const Icon(Icons.refresh), label: const Text('Thử lại')),
+                  ]))
                 : ListView(
-                    children: series
+                    children: (showingSearch ? series : trending)
                         .map((item) => Card(
                             child: ListTile(
                                 title: Text(
