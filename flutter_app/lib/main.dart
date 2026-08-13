@@ -783,8 +783,10 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
       if (mounted) setState(() => releases = value);
     } catch (exception) {
       if (mounted) {
-        setState(() => error = '$exception'.contains('season_pack_unavailable')
+        setState(() => error = '$exception'.contains('yts_tv_release_unavailable') || '$exception'.contains('season_pack_unavailable')
             ? 'Không có season pack. Hãy chọn từng tập bên dưới.'
+            : '$exception'.contains('yts_tv_provider_unavailable')
+                ? 'YTS Official đang tạm thời không kết nối được. Hãy thử lại.'
             : 'Không tìm thấy bản tải phù hợp');
       }
     } finally {
@@ -797,8 +799,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
       await widget.api.gateway('/v1/series/${selected!['tvdbId']}/download',
           method: 'POST',
           body: {
-            'guid': release['guid'],
-            'indexerId': release['indexerId'],
+            'downloadToken': release['downloadToken'],
             if (releaseEpisodeId != null) 'episodeId': releaseEpisodeId,
             if (releaseEpisodeId == null && selectedSeason != null)
               'seasonNumber': selectedSeason,
@@ -900,7 +901,7 @@ class _SeriesSearchPageState extends State<SeriesSearchPage> {
                           child: ListTile(
                               title: Text(release['title']),
                               subtitle: Text(
-                                  '${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']}'),
+                                  '${release['source'] ?? 'YTS Official'} • ${release['quality']} • ${release['codec']} • ${formatBytes(release['size'])} • seed ${release['seeders']} • peer ${release['peers'] ?? 0}'),
                               trailing: FilledButton(
                                   onPressed: release['rejected'] == true
                                       ? null

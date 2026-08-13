@@ -200,13 +200,15 @@ class SeriesApi extends Api {
     if (path == '/v1/series/123/releases?seasonNumber=1') {
       return [
         {
-          'guid': 'pack',
-          'indexerId': 2,
+          'downloadToken': 'opaque-token',
           'title': 'Test Show S01 1080p',
           'quality': 'WEBDL-1080p',
           'codec': 'H.264',
           'size': 1000,
-          'seeders': 5
+          'seeders': 5,
+          'peers': 8,
+          'source': 'YTS Official',
+          'rejected': false
         }
       ];
     }
@@ -391,9 +393,10 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('Tìm season pack'));
     await tester.pumpAndSettle();
+    expect(find.textContaining('YTS Official'), findsOneWidget);
     await tester.tap(find.text('Tải'));
     await tester.pumpAndSettle();
-    expect(
-        api.downloadBody, {'guid': 'pack', 'indexerId': 2, 'seasonNumber': 1});
+    expect(api.downloadBody,
+        {'downloadToken': 'opaque-token', 'seasonNumber': 1});
   });
 }
