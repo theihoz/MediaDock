@@ -12,6 +12,7 @@ async function fixture() {
     oldCache: path.join(root, 'cache', 'jellyfin', 'old.bin'),
     newCache: path.join(root, 'cache', 'jellyfin', 'new.bin'),
     trending: path.join(root, 'cache', 'trending.json'),
+    trendingTv: path.join(root, 'cache', 'trending-tv.json'),
     oldLog: path.join(root, 'config', 'radarr', 'logs', 'old.log'),
     config: path.join(root, 'config', 'radarr', 'config.xml'),
     media: path.join(root, 'library', 'movies', 'movie.mkv'),
@@ -43,6 +44,7 @@ test('scheduled cleanup deletes only allowlisted files older than 24 hours', asy
   assert.equal(await exists(files.oldLog), false);
   assert.equal(await exists(files.newCache), true);
   assert.equal(await exists(files.trending), true);
+  assert.equal(await exists(files.trendingTv), true);
   assert.equal(await exists(files.config), true);
   assert.equal(await exists(files.media), true);
 });
@@ -57,6 +59,7 @@ test('manual cleanup removes new disposable files but preserves trending cache',
   assert.equal(result.removedFiles, 3);
   assert.equal(await exists(files.newCache), false);
   assert.equal(await exists(files.trending), true);
+  assert.equal(await exists(files.trendingTv), true);
   assert.equal(await exists(files.config), true);
 });
 

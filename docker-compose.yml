@@ -146,6 +146,7 @@ services:
       SUBTITLE_TOKEN_SECRET: ${SUBTITLE_TOKEN_SECRET}
       SEERR_CONFIG: /service-config/seerr/settings.json
       TRENDING_CACHE: /data/cache/trending.json
+      TRENDING_TV_CACHE: /data/cache/trending-tv.json
       YTS_MOVIE_API_URL: ${YTS_MOVIE_API_URL:-https://movies-api.accel.li}
       YTS_OFFICIAL_TV_URL: ${YTS_OFFICIAL_TV_URL:-https://en.yts-official.com/}
       YTS_OFFICIAL_TV_ENABLED: ${YTS_OFFICIAL_TV_ENABLED:-true}

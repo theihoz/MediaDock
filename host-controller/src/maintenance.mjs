@@ -14,6 +14,7 @@ const logRoots = [
   ['config', 'qbittorrent', 'qBittorrent', 'logs'],
   ['config', 'autobrr', 'logs'],
 ];
+const preservedCache = ['cache/trending.json', 'cache/trending-tv.json'];
 
 export class MaintenanceCleaner {
   constructor({ mediaRoot, retentionMs = dayMs, now = () => new Date() }) {
@@ -32,13 +33,13 @@ export class MaintenanceCleaner {
       removedFiles: this.lastResult?.removedFiles ?? 0,
       reclaimedBytes: this.lastResult?.reclaimedBytes ?? 0,
       failed: this.lastResult?.failed ?? [],
-      preserved: ['cache/trending.json'],
+      preserved: preservedCache,
     };
   }
 
   async cleanup({ force = false } = {}) {
     const now = this.now();
-    const result = { lastRunAt: now.toISOString(), removedFiles: 0, reclaimedBytes: 0, failed: [], preserved: ['cache/trending.json'] };
+    const result = { lastRunAt: now.toISOString(), removedFiles: 0, reclaimedBytes: 0, failed: [], preserved: preservedCache };
     const roots = [path.join(this.mediaRoot, 'cache'), ...logRoots.map(parts => path.join(this.mediaRoot, ...parts))];
     for (const root of roots) await this.cleanDirectory(root, { force, now, result });
     this.lastResult = result;
@@ -57,7 +58,7 @@ export class MaintenanceCleaner {
       const target = path.resolve(directory, entry.name);
       const relative = path.relative(this.mediaRoot, target);
       if (relative.startsWith('..') || path.isAbsolute(relative) || entry.isSymbolicLink()) continue;
-      if (relative.replaceAll('\\', '/') === 'cache/trending.json') continue;
+      if (preservedCache.includes(relative.replaceAll('\\', '/'))) continue;
       if (entry.isDirectory()) {
         await this.cleanDirectory(target, context);
         continue;

@@ -25,6 +25,7 @@ const registry = createServiceRegistry({
 const tvProvider = process.env.YTS_OFFICIAL_TV_ENABLED === 'false' ? null : new YtsOfficialTvProvider({
   baseUrl: process.env.YTS_OFFICIAL_TV_URL ?? 'https://en.yts-official.com/',
   secret: process.env.TV_DOWNLOAD_TOKEN_SECRET ?? 'local-development-change-me',
+  cachePath: process.env.TRENDING_TV_CACHE ?? '/data/cache/trending-tv.json',
 });
 
 const media = new MediaClients({
@@ -112,6 +113,7 @@ async function route(req, res) {
   if (req.method === 'GET' && url.pathname === '/v1/movies/trending') return send(res, 200, await trending.get());
   if (req.method === 'GET' && url.pathname === '/v1/movies/search') return send(res, 200, await media.searchMovies(url.searchParams.get('q') ?? ''));
   if (req.method === 'GET' && url.pathname === '/v1/series/search') return send(res, 200, await media.searchSeries(url.searchParams.get('q') ?? ''));
+  if (req.method === 'GET' && url.pathname === '/v1/series/trending') return send(res, 200, tvProvider ? await tvProvider.trending() : { items: [], stale: false, source: 'unavailable' });
 
   let seriesMatch = url.pathname.match(/^\/v1\/series\/(\d+)$/);
   if (req.method === 'GET' && seriesMatch) return send(res, 200, media.normalizeSeries(await media.series(seriesMatch[1])));
