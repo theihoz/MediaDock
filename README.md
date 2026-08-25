@@ -1,5 +1,5 @@
 # Media Control
-
+## This project is a student-built prototype and may contain bugs or incomplete features. Contributions are welcome—feel free to fork the repository, submit pull requests, and help improve the project.
 Media Control is a Windows desktop dashboard for a self-hosted movie and TV stack. A Flutter client controls one local Node gateway and the existing Docker providers while keeping service credentials outside the app. It offers discovery, prepared downloads, live download status, Vietnamese subtitle workflows, a Jellyfin library, and local service controls.
 
 The detailed guides are available in [English](docs/guide.en.md) and [Vietnamese](docs/guide.vi.md). Release history is recorded in the [changelog](CHANGELOG.md).
