@@ -1,6 +1,6 @@
 export const services = new Set([
-  'api', 'autobrr', 'bazarr', 'flaresolverr', 'jellyfin', 'postgres',
-  'prowlarr', 'qbittorrent', 'radarr', 'redis', 'seerr', 'sonarr',
+  'api', 'bazarr', 'flaresolverr', 'jellyfin',
+  'prowlarr', 'qbittorrent', 'radarr', 'seerr', 'sonarr',
 ]);
 
 const actions = new Set(['start', 'stop', 'restart']);
@@ -16,14 +16,14 @@ export function composeArgs(action, service) {
 }
 
 export function wholeStackCommands(action) {
-  if (action === 'start') return [['compose', 'up', '-d']];
+  if (action === 'start') return [['compose', 'up', '-d', '--remove-orphans']];
   if (action === 'stop') return [['compose', 'stop']];
   if (action === 'restart') return [['compose', 'restart']];
   throw new Error(`Unsupported action: ${action}`);
 }
 
 export function stackStartPlan({ bootstrapComplete, distro, projectDir }) {
-  if (bootstrapComplete) return { kind: 'compose', args: ['up', '-d'] };
+  if (bootstrapComplete) return { kind: 'compose', args: ['up', '-d', '--remove-orphans'] };
   if (!distro || !projectDir) throw new Error('WSL bootstrap settings are missing');
   return {
     kind: 'bootstrap',
@@ -33,10 +33,4 @@ export function stackStartPlan({ bootstrapComplete, distro, projectDir }) {
       `${projectDir}/scripts/bootstrap.sh`, '--keep-running',
     ],
   };
-}
-
-export function canStopService(service, running) {
-  if (service === 'postgres' && running.has('api')) return { allowed: false, reason: 'api depends on postgres' };
-  if (service === 'redis' && running.has('api')) return { allowed: false, reason: 'api depends on redis' };
-  return { allowed: true };
 }
