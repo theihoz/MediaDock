@@ -14,7 +14,7 @@ To build the unsigned installer from source, install Flutter with Windows deskto
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 ```
 
-Run `dist\install.exe` as Administrator. The installer places the app in `C:\Program Files\Media Control` and the private stack in `C:\ProgramData\MediaControl\stack`. It prepares local configuration without starting the media containers.
+Run `dist\install.exe` . The installer places the app in `C:\Program Files\Media Control` and the private stack in `C:\ProgramData\MediaControl\stack`. It prepares local configuration without starting the media containers.
 
 For a source-only setup from Ubuntu WSL:
 
