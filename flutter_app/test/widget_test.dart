@@ -33,48 +33,6 @@ class FakeMovieApi extends Api {
         'partial': false
       };
     }
-    if (path == '/v1/movies/trending') {
-      return {
-        'items': [
-          {
-            'tmdbId': 603,
-            'title': 'The Matrix',
-            'year': 1999,
-            'overview': 'Trending movie',
-            'poster': null,
-            'rating': 8.2
-          }
-        ],
-        'source': 'live',
-        'stale': false,
-      };
-    }
-    if (path.startsWith('/v1/movies/search')) {
-      if (path.contains('Dune')) {
-        return [
-          {
-            'tmdbId': 438631,
-            'title': 'Dune',
-            'year': 2021,
-            'overview': 'Search result',
-            'poster': null
-          }
-        ];
-      }
-      return [
-        {
-          'tmdbId': 603,
-          'title': 'The Matrix',
-          'year': 1999,
-          'overview': 'Test movie',
-          'poster': null
-        }
-      ];
-    }
-    if (path == '/v1/movies/603/releases' ||
-        path == '/v1/movies/438631/releases') {
-      return [];
-    }
     throw StateError('Unexpected request: $path');
   }
 
@@ -103,7 +61,8 @@ class NyaaSourcesApi extends Api {
   Future<dynamic> host(String path, {String method = 'GET'}) async => [];
   @override
   Future<dynamic> gateway(String path,
-      {String method = 'GET', Object? body}) async => [
+          {String method = 'GET', Object? body}) async =>
+      [
         {
           'id': 'nyaa-si',
           'name': 'Nyaa.si',
@@ -323,69 +282,53 @@ class GroupedSubtitleApi extends Api {
 class SeriesApi extends Api {
   SeriesApi() : super(const LocalConfig());
   Object? downloadBody;
-  var trendingCalls = 0;
+  Object? releaseBody;
+  var releaseCalls = 0;
+
   @override
   Future<dynamic> gateway(String path,
       {String method = 'GET', Object? body}) async {
-    if (path == '/v1/series/trending') {
-      trendingCalls++;
+    if (Uri.parse(path).path == '/v1/discover/search') {
       return {
         'items': [
           {
             'mediaType': 'series',
-            'providerId': 88,
-            'tvdbId': null,
-            'title': 'Trending Show',
+            'tvdbId': 123,
+            'title': 'Test Show',
             'year': 2024,
-            'overview': 'Trending overview',
+            'overview': 'Overview',
             'poster': null,
-            'rating': 8.5,
+            'seasons': [
+              {'seasonNumber': 1}
+            ],
           }
         ],
-        'source': 'popular',
-        'stale': false,
+        'partial': false,
       };
     }
-    if (path.startsWith('/v1/series/search')) {
-      return [
-        {
-          'mediaType': 'series',
-          'tvdbId': 123,
-          'title': 'Test Show',
-          'year': 2024,
-          'overview': 'Overview',
-          'poster': null,
-          'seasons': [
-            {'seasonNumber': 1}
-          ]
-        }
-      ];
-    }
-    if (path == '/v1/series/123/episodes') {
-      return [
-        {
-          'episodeId': 91,
-          'seasonNumber': 1,
-          'episodeNumber': 2,
-          'title': 'Episode Two',
-          'hasFile': false
-        }
-      ];
-    }
-    if (path == '/v1/series/123/releases?seasonNumber=1') {
-      return [
-        {
-          'downloadToken': 'opaque-token',
-          'title': 'Test Show S01 1080p',
-          'quality': 'WEBDL-1080p',
-          'codec': 'H.264',
-          'size': 1000,
-          'seeders': 5,
-          'peers': 8,
-          'source': 'YTS Official',
-          'rejected': false
-        }
-      ];
+    if (path == '/v1/series/123/releases' && method == 'POST') {
+      releaseCalls++;
+      releaseBody = body;
+      return {
+        'items': [
+          {
+            'downloadToken': 'opaque-token',
+            'title': 'Test Show S01 1080p',
+            'quality': 'WEBDL-1080p',
+            'codec': 'H.264',
+            'size': 1000,
+            'seeders': 5,
+            'peers': 8,
+            'source': 'YTS Official',
+            'downloadable': true,
+          }
+        ],
+        'partial': false,
+        'sources': {
+          'sonarr': {'state': 'ready', 'itemCount': 1}
+        },
+        'prepared': true,
+      };
     }
     if (path == '/v1/series/123/download' && method == 'POST') {
       downloadBody = body;
@@ -393,6 +336,13 @@ class SeriesApi extends Api {
     }
     throw StateError('Unexpected request: $method $path');
   }
+}
+
+Future<void> _chooseSubtitleCatalog(WidgetTester tester, String title) async {
+  await tester.tap(find.byType(DropdownButtonFormField<String>));
+  await tester.pumpAndSettle();
+  await tester.tap(find.text(title).last);
+  await tester.pumpAndSettle();
 }
 
 void main() {
@@ -423,18 +373,22 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(find.text('Media Control'), findsOneWidget);
+    expect(find.text('Nội dung'), findsOneWidget);
+    expect(find.text('Hệ thống'), findsOneWidget);
     expect(find.text('Tổng quan'), findsWidgets);
-    expect(find.text('Khám phá'), findsOneWidget);
-    expect(find.text('Downloads'), findsOneWidget);
-    expect(find.text('Phụ đề'), findsOneWidget);
-    expect(find.text('Thư viện'), findsOneWidget);
     expect(find.text('Services'), findsOneWidget);
     expect(find.text('Cài đặt'), findsOneWidget);
-    await tester.tap(find.text('Phụ đề').first);
+    await tester.tap(find.text('Nội dung'));
     await tester.pump();
-    expect(find.text('Cho phép YIFY Direct fallback'), findsOneWidget);
-    expect(find.text('Tìm qua Bazarr'), findsOneWidget);
-    expect(find.text('Tìm trực tiếp YIFY'), findsOneWidget);
+    expect(find.text('Khám phá'), findsOneWidget);
+    expect(find.text('Downloads'), findsOneWidget);
+    expect(find.text('Vietsub'), findsOneWidget);
+    expect(find.text('Thư viện'), findsOneWidget);
+    await tester.tap(find.text('Vietsub').first);
+    await tester.pump();
+    expect(find.text('1. Nội dung'), findsOneWidget);
+    expect(find.text('Cho phép YIFY Direct fallback'), findsNothing);
+    expect(find.text('Tìm trực tiếp YIFY'), findsNothing);
   });
 
   testWidgets('Nyaa source states are readable and show safe endpoints',
@@ -452,21 +406,6 @@ void main() {
     expect(find.textContaining('<html>'), findsNothing);
   });
 
-  testWidgets('clicking a movie always opens its detail even with no releases',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: MovieSearchPage(api: FakeMovieApi()))));
-    await tester.enterText(find.byType(TextField), 'Matrix');
-    await tester.tap(find.text('Tìm'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('The Matrix (1999)'));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Chi tiết phim'), findsOneWidget);
-    expect(find.text('Không tìm thấy bản tải phù hợp'), findsOneWidget);
-    expect(find.text('Quay lại kết quả'), findsOneWidget);
-  });
-
   testWidgets(
       'discovery does not show unavailable source filters before selecting a release',
       (tester) async {
@@ -475,7 +414,9 @@ void main() {
     await tester.pumpAndSettle();
     expect(find.text('Free & Public Domain'), findsNothing);
 
-    await tester.tap(find.text('TV Show'));
+    await tester.tap(find.byKey(const Key('discover-type')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('TV Show').last);
     await tester.pumpAndSettle();
     expect(find.text('Free & Public Domain'), findsNothing);
   });
@@ -528,28 +469,6 @@ void main() {
 
     expect(api.gatewayCalls, 0);
     expect(find.text('Trạng thái: off'), findsOneWidget);
-  });
-
-  testWidgets('loads trending movies then retains search and restores trending',
-      (tester) async {
-    await tester.pumpWidget(MaterialApp(
-        home: Scaffold(body: MovieSearchPage(api: FakeMovieApi()))));
-    await tester.pumpAndSettle();
-
-    expect(find.text('Đang thịnh hành'), findsOneWidget);
-    expect(find.textContaining('The Matrix'), findsOneWidget);
-
-    await tester.enterText(find.byType(TextField), 'Dune');
-    await tester.tap(find.text('Tìm'));
-    await tester.pumpAndSettle();
-    expect(find.text('Kết quả tìm kiếm'), findsOneWidget);
-    expect(find.text('Dune (2021)'), findsOneWidget);
-
-    await tester.enterText(find.byType(TextField), '');
-    await tester.tap(find.text('Tìm'));
-    await tester.pumpAndSettle();
-    expect(find.text('Đang thịnh hành'), findsOneWidget);
-    expect(find.textContaining('The Matrix'), findsOneWidget);
   });
 
   testWidgets('refreshes downloads every second while visible', (tester) async {
@@ -640,6 +559,7 @@ void main() {
         .pumpWidget(MaterialApp(home: Scaffold(body: SubtitlesPage(api: api))));
     await tester.pumpAndSettle();
 
+    await _chooseSubtitleCatalog(tester, 'TV • Frieren (2023)');
     expect(find.textContaining('Frieren'), findsOneWidget);
     expect(find.text('Season 1 • Vietsub 1/2'), findsOneWidget);
     expect(find.textContaining('S01E01'), findsNothing);
@@ -648,7 +568,13 @@ void main() {
     await tester.tap(find.text('Season 1 • Vietsub 1/2'));
     await tester.pumpAndSettle();
     expect(api.seasonCalls, 1);
+    expect(find.text('Tập phim'), findsOneWidget);
+    expect(find.textContaining('S01E02'), findsNothing);
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
     expect(find.textContaining('S01E02'), findsOneWidget);
+    await tester.tap(find.textContaining('S01E02'));
+    await tester.pumpAndSettle();
     expect(find.text('Thiếu Vietsub'), findsOneWidget);
   });
 
@@ -659,6 +585,7 @@ void main() {
         .pumpWidget(MaterialApp(home: Scaffold(body: SubtitlesPage(api: api))));
     await tester.pumpAndSettle();
 
+    await _chooseSubtitleCatalog(tester, 'TV • Frieren (2023)');
     await tester.tap(find.textContaining('Season 1').first);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Tìm Vietsub cho Season 1'));
@@ -672,19 +599,26 @@ void main() {
 
   testWidgets('shows every subtitle provider group and English fallback',
       (tester) async {
+    tester.view.physicalSize = const Size(1200, 900);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
     final api = GroupedSubtitleApi();
     await tester
         .pumpWidget(MaterialApp(home: Scaffold(body: SubtitlesPage(api: api))));
     await tester.pumpAndSettle();
+    await _chooseSubtitleCatalog(tester, 'TV • Frieren (2023)');
     await tester.tap(find.textContaining('Season 1').first);
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButtonFormField<int>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Frieren S01E02 • Missing Vietnamese').last);
     await tester.pumpAndSettle();
     await tester.tap(find.text('Tìm riêng tập đang chọn'));
     await tester.pumpAndSettle();
 
     expect(find.text('OpenSubtitles.com • 1'), findsOneWidget);
     expect(find.text('Gestdown • 1'), findsOneWidget);
-    await tester.scrollUntilVisible(find.text('YIFY Subtitles • 0'), 250,
-        scrollable: find.byType(Scrollable).last);
     expect(find.text('YIFY Subtitles • 0'), findsOneWidget);
     expect(find.text('Không có kết quả'), findsOneWidget);
     expect(find.textContaining('English fallback'), findsOneWidget);
@@ -699,42 +633,27 @@ void main() {
     final api = SeriesApi();
     await tester
         .pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
-    await tester.tap(find.text('TV Show'));
-    await tester.pumpAndSettle();
-    expect(api.trendingCalls, 1);
-    expect(find.text('Đang thịnh hành'), findsOneWidget);
-    expect(find.text('Phổ biến trên YTS Official'), findsOneWidget);
-    expect(find.text('Trending Show (2024)'), findsOneWidget);
-    expect(find.byType(GridView), findsOneWidget);
-    await tester.enterText(find.byType(TextField).last, 'Test');
-    await tester.tap(find.text('Tìm'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.ancestor(
-        of: find.text('Test Show (2024)'), matching: find.byType(InkWell)));
-    await tester.pumpAndSettle();
-    expect(find.text('Tìm season pack'), findsNothing);
+    await tester.enterText(find.byKey(const Key('discover-query')), 'Test');
+    await tester.pump(const Duration(milliseconds: 450));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(api.releaseCalls, 0);
+
+    await tester.tap(find.byKey(const ValueKey('discover-suggestion-123')));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.text('Chi tiết TV Show'), findsOneWidget);
+    expect(find.text('Tìm bản tải'), findsOneWidget);
+    expect(api.releaseCalls, 0);
     expect(find.byIcon(Icons.image_not_supported_outlined), findsWidgets);
-    expect(find.textContaining('YTS Official'), findsWidgets);
-    await tester.ensureVisible(find.byType(FilledButton).last);
-    await tester.pumpAndSettle();
-    await tester.tap(find.byType(FilledButton).last);
+
+    await tester.tap(find.byKey(const Key('prepare-season-releases')));
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(api.releaseCalls, 1);
+    expect(api.releaseBody, {'seasonNumber': 1});
+    expect(find.text('Test Show S01 1080p'), findsOneWidget);
+
+    await tester.tap(find.text('Tải'));
     await tester.pumpAndSettle();
     expect(
         api.downloadBody, {'downloadToken': 'opaque-token', 'seasonNumber': 1});
-  });
-
-  testWidgets('clearing TV Show search restores trending', (tester) async {
-    final api = SeriesApi();
-    await tester
-        .pumpWidget(MaterialApp(home: Scaffold(body: DiscoveryPage(api: api))));
-    await tester.tap(find.text('TV Show'));
-    await tester.pumpAndSettle();
-    await tester.enterText(find.byType(TextField).last, 'Test');
-    await tester.tap(find.text('Tìm'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byIcon(Icons.clear));
-    await tester.pumpAndSettle();
-    expect(api.trendingCalls, 2);
-    expect(find.text('Đang thịnh hành'), findsOneWidget);
   });
 }

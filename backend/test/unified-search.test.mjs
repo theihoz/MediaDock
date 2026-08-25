@@ -60,3 +60,48 @@ test('caches and coalesces identical concurrent searches', async () => {
   await search.search({ query: 'matrix' });
   assert.equal(calls, 1);
 });
+
+test('prunes expired searches and caps the cache', async () => {
+  let now = 0;
+  let calls = 0;
+  const search = new UnifiedSearch({
+    movieSearch: async query => { calls += 1; return [{ tmdbId: calls, title: query }]; },
+    seriesSearch: async () => [],
+    ttlMs: 100,
+    maxEntries: 2,
+    now: () => now,
+  });
+
+  await search.search({ query: 'one', type: 'movie' });
+  await search.search({ query: 'two', type: 'movie' });
+  await search.search({ query: 'three', type: 'movie' });
+  assert.equal(search.cache.size, 2);
+  await search.search({ query: 'one', type: 'movie' });
+  assert.equal(calls, 4);
+
+  now = 101;
+  await search.search({ query: 'four', type: 'movie' });
+  assert.equal(search.cache.size, 1);
+});
+
+test('clears provider timeout handles after successful searches', async t => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const originalClearTimeout = globalThis.clearTimeout;
+  const handles = [];
+  const cleared = [];
+  t.after(() => {
+    globalThis.setTimeout = originalSetTimeout;
+    globalThis.clearTimeout = originalClearTimeout;
+  });
+  globalThis.setTimeout = (callback, delay) => {
+    const handle = { callback, delay };
+    handles.push(handle);
+    return handle;
+  };
+  globalThis.clearTimeout = handle => cleared.push(handle);
+
+  const search = new UnifiedSearch({ movieSearch: async () => [], seriesSearch: async () => [] });
+  await search.search({ query: 'matrix' });
+  assert.equal(handles.length, 2);
+  assert.deepEqual(cleared, handles);
+});

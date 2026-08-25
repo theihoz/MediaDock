@@ -20,7 +20,12 @@ export function verifySubtitleToken(token, secret, now = Math.floor(Date.now() /
     if (now > value.exp) throw new Error('expired token');
     return value.data;
   } catch (error) {
-    if (error.message === 'expired token') throw error;
-    throw new Error('invalid token');
+    if (error.message === 'expired token') {
+      error.code = 'invalid_request';
+      throw error;
+    }
+    const invalid = new Error('invalid token');
+    invalid.code = 'invalid_request';
+    throw invalid;
   }
 }

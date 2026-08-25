@@ -97,6 +97,49 @@ test('provider searches the public TV endpoint and returns only normalized exact
   assert.equal(releases[0].title, 'Show S01 1080p');
 });
 
+test('provider treats a successful empty search as ready with no releases', async () => {
+  const provider = new YtsOfficialTvProvider({
+    secret: 'secret',
+    fetchImpl: async () => new Response('{"hits":[]}', { status: 200, headers: { 'content-type': 'application/json' } }),
+  });
+  assert.deepEqual(await provider.search({ title: 'Show', year: 2024, seasonNumber: 1 }), []);
+});
+
+test('provider forwards caller cancellation to its HTTP request', async () => {
+  let requestSignal;
+  const provider = new YtsOfficialTvProvider({
+    secret: 'secret',
+    timeoutMs: 50,
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    },
+  });
+  const controller = new AbortController();
+  const pending = provider.search({ tvdbId: 123, title: 'Show', year: 2024, seasonNumber: 1 }, { signal: controller.signal });
+  const reason = new Error('source_timeout');
+  controller.abort(reason);
+
+  await assert.rejects(pending, /yts_tv_provider_unavailable/);
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(requestSignal.reason, reason);
+});
+
+test('provider preserves its own upstream timeout code', async () => {
+  const provider = new YtsOfficialTvProvider({
+    secret: 'secret',
+    timeoutMs: 5,
+    fetchImpl: async (_url, { signal }) => new Promise((_, reject) => {
+      signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+    }),
+  });
+
+  await assert.rejects(provider.search({ title: 'Show', year: 2024, seasonNumber: 1 }), error => {
+    assert.equal(error.code, 'upstream_timeout');
+    return true;
+  });
+});
+
 test('TV trending uses primary trending then stores normalized cards', async () => {
   const requested = [];
   const provider = new YtsOfficialTvProvider({
