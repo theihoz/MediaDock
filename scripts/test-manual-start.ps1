@@ -3,8 +3,11 @@ $ProjectDir = Split-Path -Parent $PSScriptRoot
 $BootstrapPath = Join-Path $PSScriptRoot 'bootstrap.sh'
 $bootstrap = Get-Content -Raw -LiteralPath $BootstrapPath
 
-if ($bootstrap -notmatch '(?m)^"\$\{DOCKER\[@\]\}" compose --env-file "\$COMPOSE_ENV_FILE" stop$') {
+if ($bootstrap -notmatch 'if \[\[ "\$KEEP_RUNNING" != true \]\]; then[\s\S]+"\$\{DOCKER\[@\]\}" compose --env-file "\$COMPOSE_ENV_FILE" stop') {
   throw 'bootstrap does not stop the media stack after configuration'
+}
+if ($bootstrap -notmatch 'touch "\$MEDIA_ROOT/config/bootstrap/\.bootstrap-complete"') {
+  throw 'bootstrap does not record successful first-run completion'
 }
 if ($bootstrap -notmatch 'Setup complete\. Media stack is stopped\. Start it from Media Control or Docker Desktop\.') {
   throw 'bootstrap does not report the final stopped state'

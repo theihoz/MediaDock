@@ -4,14 +4,20 @@ set -Eeuo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 ENV_FILE="$ROOT_DIR/.env"
 MEDIA_ROOT_DEFAULT=/mnt/d/Media
+KEEP_RUNNING=false
+if [[ "${1:-}" == "--keep-running" ]]; then KEEP_RUNNING=true; shift; fi
+[[ $# == 0 ]] || { echo "Unknown bootstrap argument: $1" >&2; exit 2; }
 
 require() { command -v "$1" >/dev/null || { echo "Missing required command: $1" >&2; exit 1; }; }
 secret() { openssl rand -hex 24; }
 
 DOCKER=(docker)
 if ! docker compose version >/dev/null 2>&1; then
-  DOCKER_EXE="/mnt/c/Users/${SUDO_USER:-${USER:-}}/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe"
-  if [[ "$(id -u)" == 0 && -d /mnt/c/Users ]]; then
+  DOCKER_EXE="/mnt/c/Program Files/Docker/Docker/resources/bin/docker.exe"
+  if [[ ! -x "$DOCKER_EXE" ]]; then
+    DOCKER_EXE="/mnt/c/Users/${SUDO_USER:-${USER:-}}/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe"
+  fi
+  if [[ ! -x "$DOCKER_EXE" && "$(id -u)" == 0 && -d /mnt/c/Users ]]; then
     WINDOWS_USER="$(basename "$(find /mnt/c/Users -mindepth 1 -maxdepth 1 -type d ! -name Public ! -name Default -print -quit)")"
     DOCKER_EXE="/mnt/c/Users/$WINDOWS_USER/AppData/Local/Programs/DockerDesktop/resources/bin/docker.exe"
   fi
@@ -60,8 +66,13 @@ cd "$ROOT_DIR"
 "${DOCKER[@]}" volume create media-stack-redis-data >/dev/null
 "${DOCKER[@]}" compose --env-file "$COMPOSE_ENV_FILE" up -d --build
 "${DOCKER[@]}" compose --env-file "$COMPOSE_ENV_FILE" ps
-"$ROOT_DIR/scripts/configure-services.sh" || true
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/install-host-controller.ps1")" || true
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/auto-configure.ps1")" || true
-"${DOCKER[@]}" compose --env-file "$COMPOSE_ENV_FILE" stop
-echo "Setup complete. Media stack is stopped. Start it from Media Control or Docker Desktop."
+"$ROOT_DIR/scripts/configure-services.sh"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/install-host-controller.ps1")"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "$(wslpath -w "$ROOT_DIR/scripts/auto-configure.ps1")"
+touch "$MEDIA_ROOT/config/bootstrap/.bootstrap-complete"
+if [[ "$KEEP_RUNNING" != true ]]; then
+  "${DOCKER[@]}" compose --env-file "$COMPOSE_ENV_FILE" stop
+  echo "Setup complete. Media stack is stopped. Start it from Media Control or Docker Desktop."
+else
+  echo "Setup complete. Media stack is running."
+fi

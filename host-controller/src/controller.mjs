@@ -22,6 +22,19 @@ export function wholeStackCommands(action) {
   throw new Error(`Unsupported action: ${action}`);
 }
 
+export function stackStartPlan({ bootstrapComplete, distro, projectDir }) {
+  if (bootstrapComplete) return { kind: 'compose', args: ['up', '-d'] };
+  if (!distro || !projectDir) throw new Error('WSL bootstrap settings are missing');
+  return {
+    kind: 'bootstrap',
+    command: 'wsl.exe',
+    args: [
+      '-d', distro, '--', 'bash',
+      `${projectDir}/scripts/bootstrap.sh`, '--keep-running',
+    ],
+  };
+}
+
 export function canStopService(service, running) {
   if (service === 'postgres' && running.has('api')) return { allowed: false, reason: 'api depends on postgres' };
   if (service === 'redis' && running.has('api')) return { allowed: false, reason: 'api depends on redis' };

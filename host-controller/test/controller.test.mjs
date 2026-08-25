@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { authorize, composeArgs, canStopService, wholeStackCommands } from '../src/controller.mjs';
+import { authorize, composeArgs, canStopService, stackStartPlan, wholeStackCommands } from '../src/controller.mjs';
 
 test('rejects requests without the local bearer token', () => {
   assert.equal(authorize({}, 'local-token'), false);
@@ -28,4 +28,25 @@ test('whole stack start applies compose changes only after the user requests sta
   assert.deepEqual(wholeStackCommands('stop'), [['compose', 'stop']]);
   assert.deepEqual(wholeStackCommands('restart'), [['compose', 'restart']]);
   assert.throws(() => wholeStackCommands('remove'), /Unsupported action/);
+});
+
+test('first start bootstraps in Ubuntu and later starts use Compose directly', () => {
+  assert.deepEqual(stackStartPlan({
+    bootstrapComplete: false,
+    distro: 'Ubuntu',
+    projectDir: '/mnt/c/ProgramData/MediaControl/stack',
+  }), {
+    kind: 'bootstrap',
+    command: 'wsl.exe',
+    args: [
+      '-d', 'Ubuntu', '--', 'bash',
+      '/mnt/c/ProgramData/MediaControl/stack/scripts/bootstrap.sh',
+      '--keep-running',
+    ],
+  });
+  assert.deepEqual(stackStartPlan({ bootstrapComplete: true }), {
+    kind: 'compose',
+    args: ['up', '-d'],
+  });
+  assert.throws(() => stackStartPlan({ bootstrapComplete: false }), /WSL bootstrap settings/);
 });

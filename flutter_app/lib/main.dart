@@ -34,7 +34,7 @@ class MediaControlApp extends StatelessWidget {
             secondary: Color(0xFF00A859),
             surface: Color(0xFF121212),
             onSurface: Color(0xFFE0E0E0),
-            surfaceVariant: Color(0xFF1E1E1E),
+            surfaceContainerHighest: Color(0xFF1E1E1E),
             onSurfaceVariant: Color(0xFFBBBBBB),
           ),
           textTheme: const TextTheme(

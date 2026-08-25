@@ -14,6 +14,18 @@ chmod +x scripts/*.sh
 
 The bootstrap creates `/mnt/d/Media`, copies `.env.example` to private `.env`, generates the two database secrets, creates media folders, temporarily starts the stack for configuration, and stops it before returning. Do not commit `.env`.
 
+## Windows installer
+
+Build the unsigned local installer with Administrator access:
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1
+```
+
+The result is `dist/install.exe`. It installs the app under `C:\Program Files\Media Control`, the stack under `C:\ProgramData\MediaControl\stack`, and creates `uninstall.exe` beside the app. Installation never starts Docker or a media container; the first **Bật server** click performs the idempotent bootstrap.
+
+Warning: the uninstaller requires typing `XOA TOAN BO` and permanently removes the installed stack, its Docker resources, and all content under `D:\Media`. It does not remove Docker Desktop, WSL, Ubuntu, the source repository, or the original installer file.
+
 If Docker Desktop WSL integration is disabled, the bootstrap automatically uses Docker Desktop's Windows CLI and converts `/mnt/d/Media` to `D:/Media` for bind mounts.
 
 The bootstrap completes the local qBittorrent, Radarr, Sonarr, Prowlarr, Bazarr and Jellyfin setup with `admin / media1234`. Prowlarr configures Internet Archive and the explicitly requested YTS indexer (`yts.gg` with `movies-api.accel.li`). Provider credentials and indexers must only be configured for sources you are authorized to use.

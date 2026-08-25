@@ -17,3 +17,5 @@ flutter_app/windows/flutter/ephemeral/
 # Local logs and runtime state
 *.log
 coverage/
+installer/.stage/
+dist/
