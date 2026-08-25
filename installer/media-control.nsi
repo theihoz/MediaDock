@@ -12,6 +12,9 @@ RequestExecutionLevel admin
 !ifndef SOURCE_DIR
   !error "SOURCE_DIR is required"
 !endif
+!ifndef APP_VERSION
+  !error "APP_VERSION is required"
+!endif
 !ifndef OUTPUT_FILE
   !define OUTPUT_FILE "install.exe"
 !endif
@@ -94,8 +97,8 @@ Section "Media Control" SEC_MAIN
   WriteRegStr HKLM "Software\MediaControl" "MediaRoot" "$MediaRoot"
   WriteRegStr HKLM "Software\MediaControl" "InstallationId" "$2"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "DisplayName" "Media Control"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "DisplayVersion" "0.1.0"
-  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "Publisher" "Media Control"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "DisplayVersion" "${APP_VERSION}"
+  WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "Publisher" "theihoz"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "InstallLocation" "$INSTDIR"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "UninstallString" '"$INSTDIR\uninstall.exe"'
   WriteRegDWORD HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MediaControl" "NoModify" 1

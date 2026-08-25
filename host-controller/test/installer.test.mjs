@@ -223,3 +223,124 @@ test('uninstall removes the owned tree without following a junction', () => {
   assert.equal(fs.readFileSync(path.join(outside, 'keep.txt'), 'utf8'), 'keep');
   fs.rmSync(temp, { recursive: true, force: true });
 });
+
+test('release version has one pubspec source and reaches NSIS', () => {
+  const pubspec = read('flutter_app/pubspec.yaml');
+  const build = read('scripts/build-installer.ps1');
+  const nsi = read('installer/media-control.nsi');
+  assert.match(pubspec, /^version: 0\.2\.0\+2$/m);
+  assert.match(build, /flutter_app[\\/]pubspec\.yaml/);
+  assert.ok(build.includes('(?<version>\\d+\\.\\d+\\.\\d+)'));
+  assert.match(build, /"\/DAPP_VERSION=\$appVersion"/);
+  assert.doesNotMatch(build, /0\.2\.0/);
+  assert.match(nsi, /!ifndef APP_VERSION[\s\S]+!error "APP_VERSION is required"/);
+  assert.match(nsi, /"DisplayVersion" "\$\{APP_VERSION\}"/);
+  assert.match(nsi, /"Publisher" "theihoz"/);
+  assert.doesNotMatch(nsi, /0\.2\.0/);
+  assert.doesNotMatch(nsi, /DisplayVersion" "0\.1\.0"/);
+});
+
+test('README has the requested English-only structure and release links', () => {
+  const readme = read('README.md');
+  assert.deepEqual(readme.match(/^#{1,2} .+$/gm), [
+    '# Media Control',
+    '## Installation Instructions',
+    '## Usage',
+    '## Examples / Demos',
+    '## License',
+  ]);
+  for (const target of ['docs/guide.en.md', 'docs/guide.vi.md', 'CHANGELOG.md', 'LICENSE']) {
+    assert.match(readme, new RegExp(`\\(${target.replace('.', '\\.') }\\)`));
+    assert.equal(fs.existsSync(path.join(root, target)), true);
+  }
+  assert.doesNotMatch(readme, /Autobrr|PostgreSQL|Redis/);
+});
+
+test('English and Vietnamese guides have equivalent ordered sections', () => {
+  const english = read('docs/guide.en.md');
+  const vietnamese = read('docs/guide.vi.md');
+  const directRepair = String.raw`powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\auto-configure.ps1 -MediaRoot 'D:\Media'`;
+  assert.deepEqual(english.match(/^## .+$/gm), [
+    '## Installation',
+    '## Workspaces',
+    '## Workflows',
+    '## Providers',
+    '## Configuration',
+    '## Docker',
+    '## Troubleshooting',
+    '## Repair',
+    '## Safe uninstall',
+  ]);
+  assert.deepEqual(vietnamese.match(/^## .+$/gm), [
+    '## Cài đặt',
+    '## Không gian làm việc',
+    '## Quy trình sử dụng',
+    '## Nhà cung cấp',
+    '## Cấu hình',
+    '## Docker',
+    '## Khắc phục sự cố',
+    '## Sửa chữa',
+    '## Gỡ cài đặt an toàn',
+  ]);
+  for (const guide of [english, vietnamese]) {
+    assert.ok(guide.replaceAll('\r\n', '\n').includes(`\`\`\`powershell\n${directRepair}\n\`\`\``));
+    assert.match(guide, /-FirstRun/);
+    assert.match(guide, /MEDIA_ROOT/);
+    assert.match(guide, /MEDIA_ROOT_DOCKER/);
+    assert.match(guide, /Seerr/);
+    assert.match(guide, /YTS/);
+    assert.match(guide, /YIFY Direct/);
+    assert.match(guide, /OpenSubtitles/);
+    assert.match(guide, /down -v/);
+    assert.match(guide, /volume rm/);
+  }
+  assert.match(english, /replaces placeholders with generated secrets on a new installation and preserves them on update/);
+  assert.match(vietnamese, /sinh secret thay placeholder ở lần cài mới và giữ nguyên khi cập nhật/);
+});
+
+test('release metadata is Media Control 0.2.0 by theihoz', () => {
+  const license = read('LICENSE');
+  const changelog = read('CHANGELOG.md');
+  const runner = read('flutter_app/windows/runner/Runner.rc');
+  assert.match(license, /^MIT License$/m);
+  assert.match(license, /Copyright \(c\) 2026 theihoz/);
+  assert.match(changelog, /^## \[0\.2\.0\] - 2026-08-25$/m);
+  assert.match(runner, /VALUE "CompanyName", "theihoz"/);
+  assert.match(runner, /VALUE "FileDescription", "Media Control"/);
+  assert.match(runner, /VALUE "InternalName", "media_control"/);
+  assert.match(runner, /VALUE "LegalCopyright", "Copyright \(C\) 2026 theihoz/);
+  assert.match(runner, /VALUE "OriginalFilename", "media_control\.exe"/);
+  assert.match(runner, /VALUE "ProductName", "Media Control"/);
+  assert.match(runner, /VALUE "ProductVersion", VERSION_AS_STRING/);
+});
+
+test('release removes stale planning docs and ignores editor state', () => {
+  const stale = [
+    'flutter_app/README.md',
+    'docs/superpowers/plans/2026-08-12-yify-subtitle-fallback.md',
+    'docs/superpowers/plans/2026-08-13-manual-start-cold-boot-trending.md',
+    'docs/superpowers/plans/2026-08-13-multi-provider-subtitle-results.md',
+    'docs/superpowers/plans/2026-08-13-nyaa-hybrid-source.md',
+    'docs/superpowers/plans/2026-08-13-parallel-download-sources.md',
+    'docs/superpowers/plans/2026-08-13-season-vietsub-auto-search.md',
+    'docs/superpowers/plans/2026-08-13-tv-show-trending.md',
+    'docs/superpowers/plans/2026-08-13-unified-media-search.md',
+    'docs/superpowers/plans/2026-08-13-vietsub-series-season.md',
+    'docs/superpowers/plans/2026-08-13-yts-official-tv-download.md',
+    'docs/superpowers/specs/2026-08-12-yify-subtitle-fallback-design.md',
+    'docs/superpowers/specs/2026-08-13-manual-start-cold-boot-trending-design.md',
+    'docs/superpowers/specs/2026-08-13-multi-provider-subtitle-results-design.md',
+    'docs/superpowers/specs/2026-08-13-nyaa-hybrid-source-design.md',
+    'docs/superpowers/specs/2026-08-13-season-vietsub-auto-search-design.md',
+    'docs/superpowers/specs/2026-08-13-tv-show-trending-design.md',
+    'docs/superpowers/specs/2026-08-13-unified-media-search-design.md',
+    'docs/superpowers/specs/2026-08-13-vietsub-series-season-design.md',
+    'docs/superpowers/specs/2026-08-13-yts-official-tv-download-design.md',
+  ];
+  assert.equal(stale.length, 20);
+  for (const relative of stale) assert.equal(fs.existsSync(path.join(root, relative)), false, relative);
+  assert.equal(fs.existsSync(path.join(root, 'README.vi.md')), false);
+  const ignore = read('.gitignore');
+  assert.match(ignore, /^\.idea\/$/m);
+  assert.match(ignore, /^\.vscode\/$/m);
+});

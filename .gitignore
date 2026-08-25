@@ -10,7 +10,8 @@ node_modules/
 # Flutter/Dart generated files
 flutter_app/.dart_tool/
 flutter_app/build/
-flutter_app/.idea/
+.idea/
+.vscode/
 flutter_app/*.iml
 flutter_app/windows/flutter/ephemeral/
 
