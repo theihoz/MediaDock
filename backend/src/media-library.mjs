@@ -4,24 +4,30 @@ const supportedSubtitleExtensions = new Set(['srt', 'ass', 'ssa', 'vtt']);
 const maxSubtitleBytes = 5 * 1024 * 1024;
 
 export class ImportStatusCache {
-  constructor({ lookup, now = Date.now, importedTtlMs = 10 * 60 * 1000, pendingTtlMs = 3000 }) {
+  constructor({ lookup, now = Date.now, importedTtlMs = 10 * 60 * 1000, pendingTtlMs = 3000, maxEntries = 200 }) {
     this.lookup = lookup;
     this.now = now;
     this.importedTtlMs = importedTtlMs;
     this.pendingTtlMs = pendingTtlMs;
+    this.maxEntries = maxEntries;
     this.values = new Map();
     this.inFlight = new Map();
   }
 
   async get(hash, category) {
     const key = `${category}:${String(hash).toLowerCase()}`;
+    const now = this.now();
+    for (const [cachedKey, value] of this.values) {
+      if (value.expiresAt <= now) this.values.delete(cachedKey);
+    }
     const cached = this.values.get(key);
-    if (cached && cached.expiresAt > this.now()) return cached.status;
+    if (cached) return cached.status;
     if (this.inFlight.has(key)) return this.inFlight.get(key);
     const pending = Promise.resolve(this.lookup(hash, category)).then(imported => {
       const status = imported ? 'imported' : 'awaiting_import';
       const ttl = imported ? this.importedTtlMs : this.pendingTtlMs;
       this.values.set(key, { status, expiresAt: this.now() + ttl });
+      while (this.values.size > this.maxEntries) this.values.delete(this.values.keys().next().value);
       return status;
     }).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, pending);

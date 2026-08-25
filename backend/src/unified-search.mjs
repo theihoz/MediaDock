@@ -26,19 +26,25 @@ function normalizeItem(value, mediaType, query) {
   };
 }
 
-function bounded(promise, timeoutMs) {
-  return Promise.race([
-    promise,
-    new Promise((_, reject) => setTimeout(() => reject(new Error('provider_timeout')), timeoutMs)),
-  ]);
+async function bounded(promise, timeoutMs) {
+  let timer;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('provider_timeout')), timeoutMs); }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export class UnifiedSearch {
-  constructor({ movieSearch, seriesSearch, ttlMs = 5 * 60 * 1000, timeoutMs = 3500, now = Date.now }) {
+  constructor({ movieSearch, seriesSearch, ttlMs = 5 * 60 * 1000, timeoutMs = 3500, maxEntries = 200, now = Date.now }) {
     this.movieSearch = movieSearch;
     this.seriesSearch = seriesSearch;
     this.ttlMs = ttlMs;
     this.timeoutMs = timeoutMs;
+    this.maxEntries = maxEntries;
     this.now = now;
     this.cache = new Map();
     this.inFlight = new Map();
@@ -49,11 +55,19 @@ export class UnifiedSearch {
     const normalized = normalizeQuery(originalQuery);
     if (normalized.length < 2) return { items: [], partial: false, sources: {}, query: originalQuery };
     const key = JSON.stringify([normalized, type, Number(year) || 0, library, Number(limit) || 50]);
+    const now = this.now();
+    for (const [cachedKey, value] of this.cache) {
+      if (value.expiresAt <= now) this.cache.delete(cachedKey);
+    }
     const cached = this.cache.get(key);
-    if (cached && cached.expiresAt > this.now()) return cached.value;
+    if (cached) return cached.value;
     if (this.inFlight.has(key)) return this.inFlight.get(key);
     const pending = this.load({ originalQuery, normalized, type, year, library, limit })
-      .then(value => { this.cache.set(key, { value, expiresAt: this.now() + this.ttlMs }); return value; })
+      .then(value => {
+        this.cache.set(key, { value, expiresAt: this.now() + this.ttlMs });
+        while (this.cache.size > this.maxEntries) this.cache.delete(this.cache.keys().next().value);
+        return value;
+      })
       .finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, pending);
     return pending;

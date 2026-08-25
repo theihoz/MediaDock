@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import path from 'node:path';
-import { decodeSubtitleUpload, ImportStatusCache, normalizeLibraryMovie, normalizeLibrarySeries, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
+import { decodeSubtitleUpload, normalizeLibraryMovie, normalizeLibrarySeries, subtitleFileName, subtitleIdFromName, subtitleNameFromId } from './media-library.mjs';
 import { matchesTvTitleScope } from './yts-official-tv.mjs';
 
 export function extractApiKey(text) {
@@ -14,6 +14,10 @@ export function apiKeyFrom(path) {
   return extractApiKey(fs.readFileSync(path, 'utf8'));
 }
 
+function sourceGroupFromName(value) {
+  return /^(Internet Archive|Public Domain Torrents)(?:\s*\([^)]*\))?$/i.test(value ?? '') ? 'free_public_domain' : 'default';
+}
+
 export function normalizeRelease(value) {
   const title = value.title ?? '';
   const codec = /(?:x|h)[ ._-]?265|hevc/i.test(title) ? 'H.265' : /av1/i.test(title) ? 'AV1' : /(?:x|h)[ ._-]?264|avc/i.test(title) ? 'H.264' : 'Unknown';
@@ -24,7 +28,7 @@ export function normalizeRelease(value) {
     guid: value.guid,
     indexerId: value.indexerId,
     source: value.indexer ?? value.indexerName ?? 'Prowlarr',
-    sourceGroup: /^(Internet Archive|Public Domain Torrents)(?:\s*\([^)]*\))?$/i.test(value.indexer ?? value.indexerName ?? '') ? 'free_public_domain' : 'default',
+    sourceGroup: sourceGroupFromName(value.indexer ?? value.indexerName),
     title,
     size: value.size ?? 0,
     seeders: value.seeders ?? 0,
@@ -165,68 +169,136 @@ function infoHashFromReleaseGuid(guid) {
   return match?.[1]?.toLowerCase() ?? null;
 }
 
-async function jsonRequest(url, options = {}) {
-  const response = await fetch(url, options);
-  const text = await response.text();
-  if (!response.ok) throw new Error(`${response.status} ${text.slice(0, 240)}`);
-  return text ? JSON.parse(text) : null;
-}
-
-async function partialSourceResults(promises, timeoutMs) {
-  const completed = [];
-  let successfulSources = 0;
-  const tracked = promises.map(promise => Promise.resolve(promise)
-    .then(value => {
-      successfulSources += 1;
-      completed.push(...value);
-    })
-    .catch(() => {}));
-  await Promise.race([
-    Promise.all(tracked),
-    new Promise(resolve => setTimeout(resolve, timeoutMs)),
-  ]);
-  if (successfulSources === 0) throw new Error('release_sources_unavailable');
-  return completed;
-}
-
-async function withSourceTimeout(promise, timeoutMs) {
-  let timer;
+export async function jsonRequest(url, { timeoutMs = 8000, signal, ...options } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => {
+    const error = new Error('upstream_timeout');
+    error.code = 'upstream_timeout';
+    controller.abort(error);
+  }, timeoutMs);
   try {
-    return await Promise.race([
-      promise,
-      new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('source_timeout')), timeoutMs); }),
-    ]);
+    const response = await fetch(url, { ...options, signal: controller.signal });
+    const text = await response.text();
+    if (!response.ok) throw new Error(`${response.status} ${text.slice(0, 240)}`);
+    return text ? JSON.parse(text) : null;
   } finally {
     clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
   }
 }
 
+async function timedFetch(url, { timeoutMs = 8000, signal, ...options } = {}) {
+  const controller = new AbortController();
+  const abort = () => controller.abort(signal?.reason);
+  if (signal?.aborted) abort();
+  else signal?.addEventListener('abort', abort, { once: true });
+  const timer = setTimeout(() => {
+    const error = new Error('upstream_timeout');
+    error.code = 'upstream_timeout';
+    controller.abort(error);
+  }, timeoutMs);
+  try {
+    return await fetch(url, { ...options, signal: controller.signal });
+  } finally {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+  }
+}
+
+async function partialSourceResults(sources, timeoutMs) {
+  const settled = await Promise.all(sources.map(async ({ id, search }) => {
+    const controller = new AbortController();
+    let timer;
+    let timedOut = false;
+    try {
+      const timeout = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          timedOut = true;
+          const error = new Error('upstream_timeout');
+          error.code = 'upstream_timeout';
+          controller.abort(error);
+          reject(error);
+        }, timeoutMs);
+      });
+      const value = await Promise.race([Promise.resolve().then(() => search(controller.signal)), timeout]);
+      const items = Array.isArray(value) ? value : [];
+      return { id, state: 'ready', items };
+    } catch (error) {
+      return { id, state: timedOut || error?.code === 'upstream_timeout' ? 'timeout' : 'failed', items: [] };
+    } finally {
+      clearTimeout(timer);
+    }
+  }));
+  if (!settled.some(source => source.state === 'ready')) {
+    const code = settled.every(source => source.state === 'timeout') ? 'upstream_timeout' : 'provider_unavailable';
+    const error = new Error(code);
+    error.code = code;
+    throw error;
+  }
+  return {
+    items: settled.flatMap(source => source.items),
+    partial: settled.some(source => source.state !== 'ready'),
+    sources: Object.fromEntries(settled.map(source => [source.id, { state: source.state, itemCount: source.items.length }])),
+  };
+}
+
+async function mapLimit(items, limit, mapper) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await mapper(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+function importedDownloadIds(history) {
+  const ids = new Set();
+  for (const item of history?.records ?? history ?? []) {
+    if (item.eventType !== 'downloadFolderImported') continue;
+    const id = String(item.downloadId ?? item.data?.downloadId ?? '').toLowerCase();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
 function releaseIdentity(release) {
+  const group = release.sourceGroup ?? 'default';
   const hash = infoHashFromReleaseGuid(release.guid);
-  if (hash) return `hash:${hash}`;
-  return `fallback:${String(release.title ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')}:${release.size ?? 0}`;
+  if (hash) return `hash:${hash}:${group}`;
+  return `fallback:${String(release.title ?? '').toLowerCase().replace(/[^a-z0-9]+/g, '')}:${release.size ?? 0}:${group}`;
 }
 
 export class ReleaseSearchCache {
-  constructor({ ttlMs = 10 * 60 * 1000, timeoutMs = 15000, now = Date.now } = {}) {
+  constructor({ ttlMs = 10 * 60 * 1000, partialTtlMs = 30 * 1000, timeoutMs = 15000, maxEntries = 200, now = Date.now } = {}) {
     this.ttlMs = ttlMs;
+    this.partialTtlMs = partialTtlMs;
     this.timeoutMs = timeoutMs;
+    this.maxEntries = maxEntries;
     this.now = now;
     this.values = new Map();
     this.inFlight = new Map();
   }
 
   async get(key, search, { force = false } = {}) {
+    const now = this.now();
+    for (const [cachedKey, value] of this.values) {
+      if (value.expiresAt <= now) this.values.delete(cachedKey);
+    }
     const cached = this.values.get(key);
-    if (!force && cached && cached.expiresAt > this.now()) return cached.value;
+    if (!force && cached) return cached.value;
     if (this.inFlight.has(key)) return this.inFlight.get(key);
 
     const pending = this.withTimeout(search()).then(value => {
-      if (!Array.isArray(value) || value.length > 0) {
-        this.values.set(key, { value, expiresAt: this.now() + this.ttlMs });
-      } else {
-        this.values.delete(key);
-      }
+      this.values.delete(key);
+      this.values.set(key, { value, expiresAt: this.now() + (value?.partial === true ? this.partialTtlMs : this.ttlMs) });
+      while (this.values.size > this.maxEntries) this.values.delete(this.values.keys().next().value);
       return value;
     }).finally(() => this.inFlight.delete(key));
     this.inFlight.set(key, pending);
@@ -239,7 +311,11 @@ export class ReleaseSearchCache {
       return await Promise.race([
         promise,
         new Promise((_, reject) => {
-          timer = setTimeout(() => reject(new Error('Tìm bản tải quá 15 giây. Hãy kiểm tra YTS trong Prowlarr rồi thử lại.')), this.timeoutMs);
+          timer = setTimeout(() => {
+            const error = new Error('upstream_timeout');
+            error.code = 'upstream_timeout';
+            reject(error);
+          }, this.timeoutMs);
         }),
       ]);
     } finally {
@@ -252,18 +328,18 @@ export class MediaClients {
   constructor(config) {
     this.config = config;
     this.tvProvider = config.tvProvider;
+    this.tvDirectEnabled = config.tvDirectEnabled ?? Boolean(config.tvProvider);
     this.qbitCookie = null;
     this.sourceTimeoutMs = config.sourceTimeoutMs ?? 8000;
     this.seasonSubtitleSearches = new Map();
+    this.importedIdsCache = new Map();
+    this.importedIdsRefreshes = new Map();
+    this.importedIdsCacheTtlMs = config.importedIdsCacheTtlMs ?? 5000;
     this.tvSourceTimeoutMs = config.tvSourceTimeoutMs ?? 30000;
-    this.nyaaSiTimeoutMs = config.nyaaSiTimeoutMs ?? 12000;
-    this.nyaaLandTimeoutMs = config.nyaaLandTimeoutMs ?? 8000;
     this.episodeRetryDelayMs = config.episodeRetryDelayMs ?? 500;
     this.releaseCache = config.releaseCache ?? new ReleaseSearchCache({
       timeoutMs: Math.max(15000, this.tvSourceTimeoutMs + 1000),
     });
-    this.importStatusCache = config.importStatusCache ?? new ImportStatusCache({ lookup: (hash, category) => this.isImported(hash, category) });
-    this.freeIndexerIdCache = new Map();
   }
 
   arrKey(name) { return apiKeyFrom(this.config[`${name}Config`]); }
@@ -309,7 +385,7 @@ export class MediaClients {
       return { state: 'ready' };
     };
     return [
-      { id: 'yts-official', name: 'YTS Official', ...detailsFor('YTS', Boolean(this.tvProvider)), scopes: ['movie', 'series'] },
+      { id: 'yts-official', name: 'YTS Official', ...detailsFor('YTS', this.tvDirectEnabled), scopes: ['movie', 'series'] },
       { id: 'eztv', name: 'EZTV', ...detailsFor('EZTV'), scopes: ['series'] },
       { id: 'internet-archive', name: 'Internet Archive', ...detailsFor('Internet Archive'), scopes: ['movie', 'series'] },
       { id: 'tokyo-toshokan', name: 'Tokyo Toshokan', ...detailsFor('Tokyo Toshokan'), scopes: ['series'] },
@@ -317,34 +393,6 @@ export class MediaClients {
       { id: 'nyaa-land', name: 'Nyaa.land', ...detailsFor('Nyaa.land'), scopes: ['movie', 'series'], endpoint: 'https://nyaa.land/' },
       { id: 'public-domain-torrents', name: 'Public Domain Torrents', state: 'needs_manual_feed', scopes: ['movie'], reason: 'No compatible Prowlarr feed configured' },
     ];
-  }
-
-  async freeIndexerIds(type) {
-    const service = type === 'series' ? 'sonarr' : 'radarr';
-    const cacheKey = `${service}:free-public-domain`;
-    const cached = this.freeIndexerIdCache.get(cacheKey);
-    if (cached && cached.expiresAt > Date.now()) return cached.ids;
-    const permitted = type === 'series' ? ['Internet Archive'] : ['Internet Archive', 'Public Domain Torrents'];
-    const rows = await this.arr(service, '/indexer');
-    const ids = rows.filter(row => permitted.some(name => String(row.name ?? '').startsWith(name)) && row.enable !== false).map(row => Number(row.id)).filter(Number.isInteger);
-    this.freeIndexerIdCache.set(cacheKey, { ids, expiresAt: Date.now() + 5 * 60 * 1000 });
-    return ids;
-  }
-
-  async defaultIndexerIds(type) {
-    const service = type === 'series' ? 'sonarr' : 'radarr';
-    const permitted = type === 'series' ? ['EZTV', 'Tokyo Toshokan'] : ['YTS'];
-    const rows = await this.arr(service, '/indexer');
-    return rows.filter(row => permitted.some(name => String(row.name ?? '').startsWith(name)) && row.enable !== false).map(row => Number(row.id)).filter(Number.isInteger);
-  }
-
-  async nyaaIndexerIds(type) {
-    const service = type === 'series' ? 'sonarr' : 'radarr';
-    const rows = await this.arr(service, '/indexer');
-    const idsFor = name => rows
-      .filter(row => String(row.name ?? '').startsWith(name) && row.enable !== false)
-      .map(row => Number(row.id)).filter(Number.isInteger);
-    return { si: idsFor('Nyaa.si'), land: idsFor('Nyaa.land') };
   }
 
   async searchMovies(term) {
@@ -387,11 +435,15 @@ export class MediaClients {
     return rows.map(item => ({ episodeId: item.id, seasonNumber: item.seasonNumber, episodeNumber: item.episodeNumber, title: item.title, airDate: item.airDate, hasFile: Boolean(item.hasFile) }));
   }
 
-  async seriesReleases(tvdbId, selection, { force = false } = {}) {
-    const series = await this.ensureSeries(tvdbId);
+  async prepareSeriesReleases(tvdbId, selection, { force = false } = {}) {
     const cacheKey = selection.episodeId ? `series:${tvdbId}:episode:${selection.episodeId}` : `series:${tvdbId}:season:${selection.seasonNumber}`;
-    return this.releaseCache.get(cacheKey, async () => {
-      if (!this.tvProvider) throw new Error('tv_provider_unavailable');
+    const result = await this.releaseCache.get(cacheKey, async () => {
+      if (!this.tvProvider) {
+        const error = new Error('provider_unavailable');
+        error.code = 'provider_unavailable';
+        throw error;
+      }
+      const series = await this.ensureSeries(tvdbId);
       let scope;
       if (selection.episodeId) {
         const episode = await this.arr('sonarr', `/episode/${encodeURIComponent(selection.episodeId)}`);
@@ -402,19 +454,31 @@ export class MediaClients {
       const path = selection.episodeId
         ? `/release?episodeId=${encodeURIComponent(selection.episodeId)}`
         : `/release?seriesId=${series.id}&seasonNumber=${encodeURIComponent(selection.seasonNumber)}`;
-      const normalizeArr = async () => {
-        let rows = await this.arr('sonarr', path);
+      const normalizeArr = async signal => {
+        let rows = await this.arr('sonarr', path, { signal });
         rows = rows.filter(row => row.guid && Number.isInteger(Number(row.indexerId)) && matchesTvTitleScope(row.title ?? '', scope));
         rows.sort((left, right) => Number(!/EZTV/i.test(left.indexer ?? left.indexerName ?? '')) - Number(!/EZTV/i.test(right.indexer ?? right.indexerName ?? '')));
-        return rows.map(row => ({ ...this.tvProvider.normalizeSonarr(row, scope), sourceGroup: 'default' }));
+        return rows.map(row => ({ ...this.tvProvider.normalizeSonarr(row, scope), sourceMode: 'prowlarr', sourceGroup: sourceGroupFromName(row.indexer ?? row.indexerName) }));
       };
-      const releases = await partialSourceResults([
-        this.tvProvider.search(scope),
-        normalizeArr(),
-      ], this.tvSourceTimeoutMs);
-      if (releases.length) return [...new Map(releases.map(release => [releaseIdentity(release), release])).values()];
-      const unavailable = new Error('tv_release_unavailable'); unavailable.code = 'tv_release_unavailable'; throw unavailable;
+      const sources = [{ id: 'sonarr', search: normalizeArr }];
+      if (this.tvDirectEnabled) {
+        sources.unshift({ id: 'yts', search: async signal => (await this.tvProvider.search(scope, { signal })).map(release => ({ ...release, sourceMode: 'yts', sourceGroup: sourceGroupFromName(release.source) })) });
+      }
+      const releases = await partialSourceResults(sources, this.tvSourceTimeoutMs);
+      return { ...releases, items: [...new Map(releases.items.map(release => [releaseIdentity(release), release])).values()] };
     }, { force });
+    const items = selection.freePublicDomain
+      ? result.items.filter(release => release.sourceGroup === 'free_public_domain')
+      : result.items;
+    const sources = Object.fromEntries(Object.entries(result.sources).map(([id, source]) => [id, {
+      ...source,
+      itemCount: items.filter(release => id === 'yts' ? release.sourceMode === 'yts' : release.sourceMode !== 'yts').length,
+    }]));
+    return { ...result, items, sources, prepared: true };
+  }
+
+  async seriesReleases(tvdbId, selection, options = {}) {
+    return (await this.prepareSeriesReleases(tvdbId, selection, options)).items;
   }
 
   async downloadSeriesRelease(tvdbId, selection) {
@@ -432,6 +496,7 @@ export class MediaClients {
     // A verified magnet can only be a direct YTS release, so keep them valid.
     release.sourceMode ??= release.magnetUrl ? 'yts' : 'prowlarr';
     if (release.sourceMode === 'yts') {
+      if (!this.tvDirectEnabled) throw new Error('invalid_download_token');
       const torrents = await this.qbit('/torrents/info');
       if ((torrents ?? []).some(torrent => String(torrent.hash).toLowerCase() === release.infoHash)) {
         return { accepted: true, duplicate: true, hash: release.infoHash };
@@ -478,15 +543,23 @@ export class MediaClients {
     return this.arr('radarr', '/movie', { method: 'POST', body: JSON.stringify({ ...movie, qualityProfileId: profiles[0]?.id, rootFolderPath: '/data/library/movies', monitored: false, addOptions: { searchForMovie: false } }) });
   }
 
-  async releases(tmdbId, { force = false } = {}) {
-    return this.releaseCache.get(`${tmdbId}`, async () => {
+  async prepareMovieReleases(tmdbId, { force = false, freePublicDomain = false } = {}) {
+    const result = await this.releaseCache.get(`movie:${tmdbId}`, async () => {
       const movie = await this.ensureMovie(tmdbId);
-      const search = async () => (await this.arr('radarr', `/release?movieId=${movie.id}`)).map(normalizeRelease);
+      const search = async signal => (await this.arr('radarr', `/release?movieId=${movie.id}`, { signal })).map(normalizeRelease);
       const releases = await partialSourceResults([
-        search(),
+        { id: 'radarr', search },
       ], this.sourceTimeoutMs);
-      return [...new Map(releases.map(release => [releaseIdentity(release), release])).values()];
+      return { ...releases, items: [...new Map(releases.items.map(release => [releaseIdentity(release), release])).values()] };
     }, { force });
+    const items = freePublicDomain
+      ? result.items.filter(release => release.sourceGroup === 'free_public_domain')
+      : result.items;
+    return { ...result, items, sources: { radarr: { ...result.sources.radarr, itemCount: items.length } }, prepared: true };
+  }
+
+  async releases(tmdbId, options = {}) {
+    return (await this.prepareMovieReleases(tmdbId, options)).items;
   }
 
   async downloadRelease(tmdbId, selection) {
@@ -514,10 +587,10 @@ export class MediaClients {
     return { accepted: true, duplicate: false, hash: infoHash };
   }
 
-  async qbitLogin() {
+  async qbitLogin({ signal } = {}) {
     if (this.qbitCookie) return this.qbitCookie;
     const body = new URLSearchParams({ username: this.config.qbitUser, password: this.config.qbitPassword });
-    const response = await fetch(`${this.config.qbitUrl}/api/v2/auth/login`, { method: 'POST', body });
+    const response = await timedFetch(`${this.config.qbitUrl}/api/v2/auth/login`, { method: 'POST', body, signal, timeoutMs: this.sourceTimeoutMs });
     const text = await response.text();
     if (!loginSucceeded(response.status, text)) throw new Error('qBittorrent login failed');
     this.qbitCookie = response.headers.get('set-cookie')?.split(';')[0];
@@ -525,34 +598,55 @@ export class MediaClients {
   }
 
   async qbit(path, options = {}) {
-    const cookie = await this.qbitLogin();
-    const response = await fetch(`${this.config.qbitUrl}/api/v2${path}`, { ...options, headers: { cookie, ...(options.headers ?? {}) } });
+    const cookie = await this.qbitLogin({ signal: options.signal });
+    const response = await timedFetch(`${this.config.qbitUrl}/api/v2${path}`, { ...options, timeoutMs: this.sourceTimeoutMs, headers: { cookie, ...(options.headers ?? {}) } });
     if (response.status === 403) { this.qbitCookie = null; throw new Error('qBittorrent session expired'); }
     if (!response.ok) throw new Error(`qBittorrent ${response.status}`);
     const text = await response.text();
     return text ? JSON.parse(text) : null;
   }
 
-  async isImported(hash, category) {
+  async importedIds(category, { signal } = {}) {
     const service = category === 'series' ? 'sonarr' : 'radarr';
     try {
-      const history = await this.arr(service, '/history?pageSize=100&sortKey=date&sortDirection=descending');
-      const expected = String(hash).toLowerCase();
-      return (history?.records ?? history ?? []).some(item =>
-        item.eventType === 'downloadFolderImported' &&
-        String(item.downloadId ?? item.data?.downloadId ?? '').toLowerCase() === expected);
-    } catch {
-      return false;
+      return importedDownloadIds(await this.arr(service, '/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending', { signal }));
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      return new Set();
     }
   }
-  async downloads() {
-    const torrents = (await this.qbit('/torrents/info')).map(normalizeTorrent);
-    const resolved = await Promise.all(torrents.map(async torrent => {
+
+  async isImported(hash, category, options = {}) {
+    return (await this.importedIds(category, options)).has(String(hash).toLowerCase());
+  }
+
+  cachedImportedIds(category, { signal } = {}) {
+    const cached = this.importedIdsCache.get(category);
+    if ((!cached || cached.expiresAt <= Date.now()) && !this.importedIdsRefreshes.has(category)) {
+      const refresh = this.importedIds(category, { signal })
+        .then(ids => {
+          if (!signal?.aborted) this.importedIdsCache.set(category, { ids, expiresAt: Date.now() + this.importedIdsCacheTtlMs });
+        })
+        .catch(() => null)
+        .finally(() => this.importedIdsRefreshes.delete(category));
+      this.importedIdsRefreshes.set(category, refresh);
+    }
+    return cached?.ids;
+  }
+
+  async downloads({ signal } = {}) {
+    const torrents = (await this.qbit('/torrents/info', { signal })).map(normalizeTorrent);
+    const categories = [...new Set(torrents
+      .filter(torrent => torrent.progress >= 100)
+      .map(torrent => torrent.category === 'series' ? 'series' : 'movies'))];
+    const imported = new Map(categories.map(category => [category, this.cachedImportedIds(category, { signal })]));
+    return torrents.map(torrent => {
       if (torrent.progress < 100) return { ...torrent, importStatus: 'downloading' };
-      const importStatus = await this.importStatusCache.get(torrent.hash, torrent.category);
+      const category = torrent.category === 'series' ? 'series' : 'movies';
+      if (!imported.get(category)) return { ...torrent, importStatus: 'checking_import', state: 'importing' };
+      const importStatus = imported.get(category).has(String(torrent.hash).toLowerCase()) ? 'imported' : 'awaiting_import';
       return { ...torrent, importStatus, state: importStatus === 'awaiting_import' ? 'importing' : torrent.state };
-    }));
-    return resolved.filter(torrent => torrent.importStatus !== 'imported');
+    }).filter(torrent => torrent.importStatus !== 'imported');
   }
   async torrentAction(action, hash) {
     const endpoint = qbitActionEndpoint(action);
@@ -571,9 +665,8 @@ export class MediaClients {
       this.bazarr('/movies?start=0&length=-1'),
       this.arr('sonarr', '/series').catch(() => []),
     ]);
-    const seriesGroups = await Promise.all((series ?? [])
-      .filter(item => Number(item.statistics?.episodeFileCount ?? 0) > 0)
-      .map(async item => {
+    const seriesGroups = await mapLimit((series ?? [])
+      .filter(item => Number(item.statistics?.episodeFileCount ?? 0) > 0), 4, async item => {
       try {
         const result = await this.bazarr(`/episodes?seriesid[]=${encodeURIComponent(item.id)}`);
         const rows = (result?.data ?? result ?? []).filter(episode => episode.path);
@@ -582,7 +675,7 @@ export class MediaClients {
       const rows = await this.arr('sonarr', `/episode?seriesId=${encodeURIComponent(item.id)}&includeEpisodeFile=true`).catch(() => []);
       const imported = rows.filter(episode => episode.hasFile && episode.episodeFile?.path);
       return summarizeSubtitleSeries(item, imported, true);
-    }));
+    });
     return [
       ...(movies?.data ?? movies ?? []).map(normalizeSubtitleMedia),
       ...seriesGroups.filter(item => item.episodeCount > 0),
@@ -705,9 +798,9 @@ export class MediaClients {
     return this.bazarr(`/episodes?episodeid=${encodeURIComponent(episodeId)}&action=scan-disk`, { method: 'PATCH', body: '{}' });
   }
 
-  async refreshJellyfin() {
+  async refreshJellyfin({ signal } = {}) {
     if (!this.config.jellyfinApiKey) return null;
-    const response = await fetch(`${this.config.jellyfinUrl}/Library/Refresh`, { method: 'POST', headers: { 'x-emby-token': this.config.jellyfinApiKey } });
+    const response = await timedFetch(`${this.config.jellyfinUrl}/Library/Refresh`, { method: 'POST', headers: { 'x-emby-token': this.config.jellyfinApiKey }, signal, timeoutMs: this.sourceTimeoutMs });
     if (!response.ok) throw new Error(`Jellyfin ${response.status}`);
     return null;
   }
@@ -739,8 +832,15 @@ export class MediaClients {
   async uploadLocalSubtitle(radarrId, value) {
     const movie = await this.managedMovie(radarrId);
     if (!movie.movieFile?.path) throw new Error('Movie file is unavailable');
-    const upload = decodeSubtitleUpload(value);
-    const name = subtitleFileName(movie.movieFile.path, { ...value, extension: upload.extension });
+    let upload;
+    let name;
+    try {
+      upload = decodeSubtitleUpload(value);
+      name = subtitleFileName(movie.movieFile.path, { ...value, extension: upload.extension });
+    } catch (error) {
+      error.code = 'invalid_request';
+      throw error;
+    }
     await fsp.writeFile(path.join(path.dirname(movie.movieFile.path), name), upload.buffer, { flag: value.replace ? 'w' : 'wx' });
     await this.refreshSubtitles(radarrId);
     await this.refreshJellyfin();
@@ -780,15 +880,16 @@ export class MediaClients {
     const [movies, series, jellyfin] = await Promise.all([
       this.arr('radarr', '/movie'),
       this.arr('sonarr', '/series').catch(() => []),
-      this.jellyfin('/Items?Recursive=true&IncludeItemTypes=Movie,Series&Fields=Overview,Path,UserData,ProviderIds') ?? { Items: [] },
+      this.jellyfin('/Items?Recursive=true&IncludeItemTypes=Movie,Series&Fields=Overview,Path,UserData,ProviderIds').then(value => value ?? { Items: [] }),
     ]);
-    const movieItems = await Promise.all(movies.filter(movie => movie.hasFile !== false && movie.movieFile?.path).map(async movie => {
-      const item = (jellyfin.Items ?? []).find(value => value.Path === movie.movieFile.path);
+    const jellyfinByPath = new Map((jellyfin.Items ?? []).map(item => [item.Path, item]));
+    const movieItems = await mapLimit(movies.filter(movie => movie.hasFile !== false && movie.movieFile?.path), 8, async movie => {
+      const item = jellyfinByPath.get(movie.movieFile.path);
       const subtitles = await this.localSubtitlesForMovie(movie);
       return normalizeLibraryMovie(movie, item, subtitles.length);
-    }));
+    });
     const seriesItems = series.filter(item => Number(item.statistics?.episodeFileCount ?? 0) > 0).map(item => {
-      const jellyfinItem = (jellyfin.Items ?? []).find(value => value.Path === item.path);
+      const jellyfinItem = jellyfinByPath.get(item.path);
       return normalizeLibrarySeries(item, jellyfinItem);
     });
     return [...movieItems, ...seriesItems];

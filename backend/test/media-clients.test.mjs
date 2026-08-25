@@ -9,6 +9,7 @@ import {
   buildSubtitleDownloadQuery,
   filterSubtitleResults,
   extractApiKey,
+  jsonRequest,
   loginSucceeded,
   MediaClients,
   normalizeRelease,
@@ -18,6 +19,109 @@ import {
   qbitActionEndpoint,
   ReleaseSearchCache,
 } from '../src/media-clients.mjs';
+
+test('aborts a stalled JSON request at its timeout', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let aborted = false;
+  globalThis.fetch = (_url, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => {
+      aborted = true;
+      reject(signal.reason);
+    }, { once: true });
+  });
+
+  await assert.rejects(jsonRequest('https://media.test/stalled', { timeoutMs: 5 }), error => {
+    assert.equal(error.code, 'upstream_timeout');
+    return true;
+  });
+  assert.equal(aborted, true);
+});
+
+test('clears the JSON request timeout after a successful response', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let signal;
+  globalThis.fetch = async (_url, options) => {
+    signal = options.signal;
+    return new Response('{"ok":true}', { headers: { 'content-type': 'application/json' } });
+  };
+
+  assert.deepEqual(await jsonRequest('https://media.test/ready', { timeoutMs: 5 }), { ok: true });
+  await new Promise(resolve => setTimeout(resolve, 15));
+  assert.equal(signal.aborted, false);
+});
+
+test('forwards an external abort reason to the JSON request signal', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const controller = new AbortController();
+  const reason = new Error('caller cancelled');
+  let requestSignal;
+  globalThis.fetch = async (_url, { signal }) => {
+    requestSignal = signal;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  };
+
+  const pending = jsonRequest('https://media.test/cancelled', { signal: controller.signal, timeoutMs: 1000 });
+  controller.abort(reason);
+  await assert.rejects(pending, error => error === reason);
+  assert.equal(requestSignal.reason, reason);
+});
+
+test('bounds raw qBittorrent and Jellyfin fetches without a caller signal', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  globalThis.fetch = (_url, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+  const config = {
+    qbitUrl: 'https://qbit.test', qbitUser: 'user', qbitPassword: 'pass',
+    jellyfinUrl: 'https://jellyfin.test', jellyfinApiKey: 'key', sourceTimeoutMs: 5,
+  };
+
+  const qbitClient = new MediaClients(config);
+  qbitClient.qbitCookie = 'SID=1';
+  const deadline = promise => Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => {
+      const error = new Error('test_deadline');
+      error.code = 'test_deadline';
+      reject(error);
+    }, 50)),
+  ]);
+
+  for (const request of [
+    () => new MediaClients(config).qbitLogin(),
+    () => qbitClient.qbit('/app/version'),
+    () => new MediaClients(config).refreshJellyfin(),
+  ]) {
+    await assert.rejects(deadline(request()), error => {
+      assert.equal(error.code, 'upstream_timeout');
+      return true;
+    });
+  }
+});
+
+test('aborts a raw fetch at its deadline even with a live caller signal', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  let requestSignal;
+  globalThis.fetch = (_url, { signal }) => {
+    requestSignal = signal;
+    return new Promise((_, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+  };
+  const controller = new AbortController();
+  const media = new MediaClients({ qbitUrl: 'https://qbit.test', qbitUser: 'user', qbitPassword: 'pass', sourceTimeoutMs: 5 });
+
+  await assert.rejects(media.qbitLogin({ signal: controller.signal }), error => {
+    assert.equal(error.code, 'upstream_timeout');
+    return true;
+  });
+  assert.equal(controller.signal.aborted, false);
+  assert.equal(requestSignal.aborted, true);
+  assert.equal(requestSignal.reason.code, 'upstream_timeout');
+});
 
 test('coalesces release searches and caches the result until the ttl expires', async () => {
   let calls = 0;
@@ -45,9 +149,9 @@ test('coalesces release searches and caches the result until the ttl expires', a
   assert.deepEqual(await expired, [{ guid: 'matrix-2' }]);
 });
 
-test('fails a release search with a useful timeout error', async () => {
+test('fails a release search with a stable timeout error', async () => {
   const cache = new ReleaseSearchCache({ ttlMs: 600000, timeoutMs: 5 });
-  await assert.rejects(cache.get('414906', () => new Promise(() => {})), /15 giây/);
+  await assert.rejects(cache.get('414906', () => new Promise(() => {})), /upstream_timeout/);
 });
 
 test('allows normal indexer latency while searches still run in parallel', () => {
@@ -57,17 +161,45 @@ test('allows normal indexer latency while searches still run in parallel', () =>
   assert.equal(media.releaseCache.timeoutMs, 31000);
 });
 
-test('does not keep an empty release result in the long-lived cache', async () => {
+test('keeps a successful empty release result in the full-result cache', async () => {
   let calls = 0;
   const cache = new ReleaseSearchCache({ ttlMs: 600000 });
-  const search = async () => {
-    calls += 1;
-    return calls === 1 ? [] : [{ guid: 'available-now' }];
-  };
+  const search = async () => { calls += 1; return []; };
 
   assert.deepEqual(await cache.get('movie', search), []);
-  assert.deepEqual(await cache.get('movie', search), [{ guid: 'available-now' }]);
-  assert.equal(calls, 2);
+  assert.deepEqual(await cache.get('movie', search), []);
+  assert.equal(calls, 1);
+});
+
+test('uses a short ttl for partial releases and prunes expired and oldest cache entries', async () => {
+  let now = 1000;
+  let calls = 0;
+  const cache = new ReleaseSearchCache({
+    ttlMs: 600000,
+    partialTtlMs: 30000,
+    maxEntries: 2,
+    now: () => now,
+  });
+  const defaults = new ReleaseSearchCache();
+  assert.equal(defaults.ttlMs, 600000);
+  assert.equal(defaults.partialTtlMs, 30000);
+  assert.equal(defaults.maxEntries, 200);
+  const partial = async () => ({ items: [{ guid: `partial-${++calls}` }], partial: true, sources: {} });
+
+  assert.equal((await cache.get('partial', partial)).items[0].guid, 'partial-1');
+  now += 29999;
+  assert.equal((await cache.get('partial', partial)).items[0].guid, 'partial-1');
+  now += 2;
+  assert.equal((await cache.get('partial', partial)).items[0].guid, 'partial-2');
+
+  await cache.get('full-a', async () => ({ items: [], partial: false, sources: {} }));
+  await cache.get('full-b', async () => ({ items: [], partial: false, sources: {} }));
+  assert.equal(cache.values.size, 2);
+  assert.equal(cache.values.has('partial'), false);
+
+  now += 600001;
+  await cache.get('full-c', async () => ({ items: [], partial: false, sources: {} }));
+  assert.deepEqual([...cache.values.keys()], ['full-c']);
 });
 
 test('a forced release search bypasses a populated cache entry', async () => {
@@ -195,19 +327,85 @@ test('normalizes Bazarr episodes for the same subtitle selector', () => {
 });
 
 test('hides only completed torrents confirmed as imported', async () => {
-  const media = new MediaClients({
-    importStatusCache: { get: async hash => hash === 'done' ? 'imported' : 'awaiting_import' },
-  });
+  const media = new MediaClients({});
   media.qbit = async () => [
     { hash: 'active', name: 'Active', progress: .5, state: 'downloading', category: 'movies' },
     { hash: 'waiting', name: 'Waiting', progress: 1, state: 'stalledUP', category: 'movies' },
     { hash: 'done', name: 'Done', progress: 1, state: 'forcedUP', category: 'movies' },
   ];
+  media.arr = async (service, requestPath) => {
+    assert.equal(service, 'radarr');
+    assert.equal(requestPath, '/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending');
+    return { records: [{ eventType: 'downloadFolderImported', downloadId: 'DONE' }] };
+  };
 
+  assert.deepEqual((await media.downloads()).map(item => [item.hash, item.importStatus, item.state]), [
+    ['active', 'downloading', 'downloading'],
+    ['waiting', 'checking_import', 'importing'],
+    ['done', 'checking_import', 'importing'],
+  ]);
+  await Promise.all(media.importedIdsRefreshes.values());
   assert.deepEqual((await media.downloads()).map(item => [item.hash, item.importStatus, item.state]), [
     ['active', 'downloading', 'downloading'],
     ['waiting', 'awaiting_import', 'importing'],
   ]);
+});
+
+test('returns download snapshots without waiting for a coalesced history refresh', async () => {
+  const media = new MediaClients({});
+  media.qbit = async () => [
+    { hash: 'done', name: 'Done', progress: 1, state: 'forcedUP', category: 'movies' },
+  ];
+  let historyCalls = 0;
+  let resolveHistory;
+  const history = new Promise(resolve => { resolveHistory = resolve; });
+  media.arr = async () => { historyCalls += 1; return history; };
+
+  const first = media.downloads();
+  await new Promise(resolve => setImmediate(resolve));
+  const second = media.downloads();
+  const outcome = await Promise.race([
+    Promise.all([first, second]),
+    new Promise(resolve => setTimeout(() => resolve('slow'), 30)),
+  ]);
+  resolveHistory({ records: [{ eventType: 'downloadFolderImported', downloadId: 'DONE' }] });
+  await Promise.all([first, second]);
+
+  assert.notEqual(outcome, 'slow');
+  assert.equal(historyCalls, 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(await media.downloads(), []);
+});
+
+test('batches 50 and 200 completed torrents into at most one Arr history page per category', async () => {
+  for (const [count, mixed] of [[50, false], [200, true]]) {
+    const calls = [];
+    const media = new MediaClients({});
+    media.qbit = async () => Array.from({ length: count }, (_, index) => ({
+      hash: `hash-${index}`,
+      name: `Torrent ${index}`,
+      progress: 1,
+      state: 'stalledUP',
+      category: mixed && index % 2 ? 'series' : 'movies',
+    }));
+    media.arr = async (service, requestPath) => {
+      calls.push([service, requestPath]);
+      return service === 'radarr'
+        ? { records: [{ eventType: 'downloadFolderImported', downloadId: 'HASH-0' }] }
+        : { records: [{ eventType: 'downloadFolderImported', data: { downloadId: 'HASH-1' } }] };
+    };
+
+    assert.equal((await media.downloads()).length, count);
+    await Promise.all(media.importedIdsRefreshes.values());
+    const downloads = await media.downloads();
+    assert.equal(downloads.length, count - (mixed ? 2 : 1));
+    assert.equal(downloads.some(item => item.hash === 'hash-0'), false);
+    assert.equal(downloads.some(item => item.hash === 'hash-1'), !mixed);
+    assert.deepEqual(calls, (mixed ? ['radarr', 'sonarr'] : ['radarr']).map(service => [
+      service,
+      '/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending',
+    ]));
+  }
 });
 
 test('matches Arr import history by download hash without relying on its broken filter', async () => {
@@ -215,11 +413,60 @@ test('matches Arr import history by download hash without relying on its broken 
   let requestPath;
   media.arr = async (_service, path) => {
     requestPath = path;
-    return { records: [{ eventType: 'downloadFolderImported', downloadId: 'ABC123' }] };
+    return { records: [{ eventType: 'downloadFolderImported', data: { downloadId: 'ABC123' } }] };
   };
   assert.equal(await media.isImported('abc123', 'movies'), true);
-  assert.match(requestPath, /pageSize=100/);
+  assert.equal(requestPath, '/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending');
   assert.doesNotMatch(requestPath, /downloadId=/);
+});
+
+test('propagates a download poll abort signal through qBittorrent auth/info and Arr history', async t => {
+  const originalFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = originalFetch; });
+  const controller = new AbortController();
+  const fetchSignals = [];
+  let arrSignal;
+  globalThis.fetch = async (url, options) => {
+    fetchSignals.push(options.signal);
+    if (String(url).endsWith('/auth/login')) {
+      return new Response('Ok.', { headers: { 'set-cookie': 'SID=test; Path=/' } });
+    }
+    return new Response(JSON.stringify([
+      { hash: 'waiting', name: 'Waiting', progress: 1, state: 'stalledUP', category: 'series' },
+    ]));
+  };
+  const media = new MediaClients({ qbitUrl: 'http://qbit.test', qbitUser: 'user', qbitPassword: 'pass' });
+  media.arr = async (service, requestPath, options) => {
+    assert.equal(service, 'sonarr');
+    assert.equal(requestPath, '/history?page=1&pageSize=1000&sortKey=date&sortDirection=descending');
+    arrSignal = options.signal;
+    return { records: [] };
+  };
+
+  await media.downloads({ signal: controller.signal });
+  assert.equal(fetchSignals.length, 2);
+  assert.notEqual(fetchSignals[0], controller.signal);
+  assert.notEqual(fetchSignals[1], controller.signal);
+  assert.equal(arrSignal, controller.signal);
+});
+
+test('does not turn an aborted Arr history request into an awaiting import result', async () => {
+  const controller = new AbortController();
+  const reason = new Error('subscriber disconnected');
+  const media = new MediaClients({});
+  media.qbit = async () => [
+    { hash: 'waiting', name: 'Waiting', progress: 1, state: 'stalledUP', category: 'movies' },
+  ];
+  media.arr = async (_service, _requestPath, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+
+  const downloads = await media.downloads({ signal: controller.signal });
+  await new Promise(resolve => setImmediate(resolve));
+  controller.abort(reason);
+  await Promise.all(media.importedIdsRefreshes.values());
+  assert.equal(downloads[0].importStatus, 'checking_import');
+  assert.equal(media.importedIdsCache.has('movies'), false);
 });
 
 test('searches and normalizes Sonarr series by TVDB id', async () => {
@@ -245,7 +492,7 @@ test('waits briefly for Sonarr to populate episodes after adding a series', asyn
   assert.deepEqual(episodes, [{ episodeId: 91, seasonNumber: 1, episodeNumber: 1, title: 'Pilot', airDate: undefined, hasFile: false }]);
 });
 
-test('uses YTS releases without calling Sonarr fallback', async () => {
+test('passes season and episode scopes to YTS when the Sonarr source fails', async () => {
   const searches = [];
   const media = new MediaClients({ tvProvider: { search: async scope => { searches.push(scope); return [{ downloadToken: 'token' }]; } } });
   media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
@@ -330,6 +577,125 @@ test('returns fast YTS TV releases without waiting for a stalled Sonarr source',
   assert.deepEqual(releases.map(item => item.source), ['YTS Official']);
 });
 
+test('prepares TV releases with per-source states and aborts a timed-out source', async () => {
+  let ytsAborted = false;
+  let sonarrSignal;
+  const media = new MediaClients({
+    tvSourceTimeoutMs: 5,
+    tvProvider: {
+      search: async (_scope, { signal }) => new Promise((_, reject) => signal.addEventListener('abort', () => {
+        ytsAborted = true;
+        reject(signal.reason);
+      }, { once: true })),
+      normalizeSonarr: row => ({ title: row.title, source: row.indexer, sourceMode: 'prowlarr' }),
+    },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.arr = async (_service, requestPath, options) => {
+    assert.equal(requestPath, '/release?seriesId=7&seasonNumber=1');
+    sonarrSignal = options.signal;
+    return [{ title: 'Show S01', guid: 'g1', indexerId: 4, indexer: 'EZTV' }];
+  };
+
+  const prepared = await media.prepareSeriesReleases(123, { seasonNumber: 1 });
+  assert.equal(ytsAborted, true);
+  assert.equal(sonarrSignal instanceof AbortSignal, true);
+  assert.deepEqual(prepared.sources, {
+    yts: { state: 'timeout', itemCount: 0 },
+    sonarr: { state: 'ready', itemCount: 1 },
+  });
+  assert.equal(prepared.partial, true);
+  assert.equal(prepared.prepared, true);
+  assert.deepEqual(prepared.items.map(item => item.source), ['EZTV']);
+});
+
+test('keeps Sonarr prepare and download available when direct YTS TV is disabled', async () => {
+  let directCalls = 0;
+  const sent = [];
+  const media = new MediaClients({
+    tvDirectEnabled: false,
+    tvProvider: {
+      search: async () => { directCalls += 1; return []; },
+      normalizeSonarr: row => ({ ...row, source: row.indexer, sourceMode: 'prowlarr', downloadToken: 'token' }),
+      resolveToken: () => ({ sourceMode: 'prowlarr', guid: 'g', indexerId: 4, infoHash: null }),
+    },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024, seasons: [{ seasonNumber: 1, monitored: false }] });
+  media.arr = async (_service, requestPath, options = {}) => {
+    if (requestPath === '/release?seriesId=7&seasonNumber=1') {
+      return [{ title: 'Show S01', guid: 'g', indexerId: 4, indexer: 'EZTV' }];
+    }
+    sent.push({ requestPath, method: options.method });
+    return {};
+  };
+  media.qbit = async () => assert.fail('Prowlarr release must not use qBittorrent directly');
+
+  const prepared = await media.prepareSeriesReleases(123, { seasonNumber: 1 });
+  assert.equal(directCalls, 0);
+  assert.deepEqual(prepared.items.map(item => item.source), ['EZTV']);
+  assert.deepEqual(prepared.sources, { sonarr: { state: 'ready', itemCount: 1 } });
+
+  await media.downloadSeriesRelease(123, { downloadToken: 'token', seasonNumber: 1 });
+  assert.deepEqual(sent, [
+    { requestPath: '/series/7', method: 'PUT' },
+    { requestPath: '/release', method: 'POST' },
+  ]);
+});
+
+test('filters prepared and legacy TV releases by normalized source group', async () => {
+  const media = new MediaClients({
+    tvProvider: {
+      search: async () => [{ title: 'Show S01 YTS', source: 'YTS Official', sourceMode: 'yts' }],
+      normalizeSonarr: row => ({ title: row.title, source: row.indexer, sourceMode: 'prowlarr' }),
+    },
+  });
+  media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
+  media.arr = async () => [
+    { title: 'Show S01 EZTV', guid: 'g1', indexerId: 4, indexer: 'EZTV' },
+    { title: 'Show S01 Archive', guid: 'g2', indexerId: 12, indexer: 'Internet Archive' },
+  ];
+
+  const prepared = await media.prepareSeriesReleases(123, { seasonNumber: 1, freePublicDomain: true });
+  assert.deepEqual(prepared.items.map(item => item.source), ['Internet Archive']);
+  assert.deepEqual(prepared.sources, {
+    yts: { state: 'ready', itemCount: 0 },
+    sonarr: { state: 'ready', itemCount: 1 },
+  });
+  assert.deepEqual((await media.seriesReleases(123, { seasonNumber: 1 })).map(item => item.source), [
+    'YTS Official', 'EZTV', 'Internet Archive',
+  ]);
+});
+
+test('treats successful empty TV sources as a cacheable full result', async () => {
+  let ensureCalls = 0;
+  let ytsCalls = 0;
+  let sonarrCalls = 0;
+  const media = new MediaClients({
+    tvProvider: {
+      search: async () => { ytsCalls += 1; return []; },
+      normalizeSonarr: row => row,
+    },
+  });
+  media.ensureSeries = async () => { ensureCalls += 1; return { id: 7, tvdbId: 123, title: 'Show', year: 2024 }; };
+  media.arr = async () => { sonarrCalls += 1; return []; };
+
+  const first = await media.prepareSeriesReleases(123, { seasonNumber: 1 });
+  const cached = await media.prepareSeriesReleases(123, { seasonNumber: 1 });
+  assert.deepEqual(first, {
+    items: [],
+    partial: false,
+    sources: {
+      yts: { state: 'ready', itemCount: 0 },
+      sonarr: { state: 'ready', itemCount: 0 },
+    },
+    prepared: true,
+  });
+  assert.deepEqual(cached, first);
+  assert.equal(ensureCalls, 1);
+  assert.equal(ytsCalls, 1);
+  assert.equal(sonarrCalls, 1);
+});
+
 test('keeps waiting for TV indexers after the direct YTS source fails', async () => {
   const media = new MediaClients({
     tvSourceTimeoutMs: 30,
@@ -339,8 +705,6 @@ test('keeps waiting for TV indexers after the direct YTS source fails', async ()
     },
   });
   media.ensureSeries = async () => ({ id: 7, tvdbId: 123, title: 'Show', year: 2024 });
-  media.defaultIndexerIds = async () => [4];
-  media.freeIndexerIds = async () => [];
   media.arr = async () => {
     await new Promise(resolve => setTimeout(resolve, 15));
     return [{ title: 'Show S01', guid: 'g', indexerId: 4, indexer: 'Nyaa.si', fullSeason: true, seasonNumber: 1 }];
@@ -368,7 +732,7 @@ test('asks Sonarr once while Prowlarr searches all TV indexers concurrently', as
 });
 
 test('asks Radarr once while Prowlarr searches all movie indexers concurrently', async () => {
-  const media = new MediaClients({ restrictDefaultIndexers: true });
+  const media = new MediaClients({});
   media.ensureMovie = async () => ({ id: 7 });
   const requests = [];
   media.arr = async (_service, requestPath) => {
@@ -383,11 +747,49 @@ test('asks Radarr once while Prowlarr searches all movie indexers concurrently',
   assert.deepEqual(requests, ['/release?movieId=7']);
 });
 
-test('deduplicates the same movie release returned by multiple source searches', async () => {
-  const media = new MediaClients({ restrictDefaultIndexers: true });
+test('prepares movie releases and keeps the legacy array while filtering public-domain items', async () => {
+  const media = new MediaClients({});
   media.ensureMovie = async () => ({ id: 7 });
-  media.defaultIndexerIds = async () => [2];
-  media.freeIndexerIds = async () => [12];
+  media.arr = async () => [
+    { title: 'Movie YTS', guid: 'yts', indexerId: 2, indexer: 'YTS' },
+    { title: 'Movie Archive', guid: 'archive', indexerId: 12, indexer: 'Internet Archive' },
+  ];
+
+  const prepared = await media.prepareMovieReleases(603, { freePublicDomain: true });
+  assert.equal(prepared.prepared, true);
+  assert.equal(prepared.partial, false);
+  assert.deepEqual(prepared.items.map(item => item.source), ['Internet Archive']);
+  assert.deepEqual(prepared.sources, { radarr: { state: 'ready', itemCount: 1 } });
+  assert.deepEqual((await media.releases(603)).map(item => item.source), ['YTS', 'Internet Archive']);
+});
+
+test('keeps source-group variants distinct before public-domain filtering', async () => {
+  const media = new MediaClients({});
+  media.ensureMovie = async () => ({ id: 7 });
+  media.arr = async () => [
+    { title: 'Same Movie', size: 1000, guid: 'archive', indexerId: 12, indexer: 'Internet Archive' },
+    { title: 'Same Movie', size: 1000, guid: 'yts', indexerId: 2, indexer: 'YTS' },
+  ];
+
+  const prepared = await media.prepareMovieReleases(603, { freePublicDomain: true });
+  assert.deepEqual(prepared.items.map(item => item.source), ['Internet Archive']);
+});
+
+test('preserves upstream timeout codes returned by a release source', async () => {
+  const media = new MediaClients({});
+  media.ensureMovie = async () => ({ id: 7 });
+  media.arr = async () => {
+    const error = new Error('upstream_timeout');
+    error.code = 'upstream_timeout';
+    throw error;
+  };
+
+  await assert.rejects(media.prepareMovieReleases(603), error => error.code === 'upstream_timeout');
+});
+
+test('deduplicates the same movie release returned by multiple source searches', async () => {
+  const media = new MediaClients({});
+  media.ensureMovie = async () => ({ id: 7 });
   media.arr = async () => [{ title: 'Movie 1080p', guid: 'same', indexerId: 2, indexer: 'YTS (Prowlarr)' }];
 
   const releases = await media.releases(603);
@@ -396,7 +798,7 @@ test('deduplicates the same movie release returned by multiple source searches',
 
 test('deduplicates Nyaa mirrors returned by one Radarr interactive search', async () => {
   const hash = 'a'.repeat(40);
-  const media = new MediaClients({ restrictDefaultIndexers: true });
+  const media = new MediaClients({});
   media.ensureMovie = async () => ({ id: 7 });
   const started = [];
   media.arr = async (_service, requestPath) => {
@@ -413,13 +815,25 @@ test('deduplicates Nyaa mirrors returned by one Radarr interactive search', asyn
 });
 
 test('reports provider failure instead of pretending there are no movie releases', async () => {
-  const media = new MediaClients({ restrictDefaultIndexers: true, sourceTimeoutMs: 20 });
+  const media = new MediaClients({ sourceTimeoutMs: 20 });
   media.ensureMovie = async () => ({ id: 7 });
-  media.defaultIndexerIds = async () => [2];
-  media.freeIndexerIds = async () => [12];
   media.arr = async () => { throw new Error('indexer offline'); };
 
-  await assert.rejects(media.releases(603), /release_sources_unavailable/);
+  await assert.rejects(media.releases(603), /provider_unavailable/);
+});
+
+test('reports upstream timeout when every movie source reaches its deadline', async () => {
+  const media = new MediaClients({ sourceTimeoutMs: 5 });
+  media.ensureMovie = async () => ({ id: 7 });
+  media.arr = async (_service, _path, { signal }) => new Promise((_, reject) => {
+    signal.addEventListener('abort', () => reject(signal.reason), { once: true });
+  });
+
+  await assert.rejects(media.prepareMovieReleases(603), error => {
+    assert.equal(error.code, 'upstream_timeout');
+    assert.equal(error.message, 'upstream_timeout');
+    return true;
+  });
 });
 
 test('returns idempotent success when a selected movie torrent already exists', async () => {
@@ -451,17 +865,6 @@ test('recovers when qBittorrent reports a duplicate during the Radarr add race',
   }), { accepted: true, duplicate: true, hash });
 });
 
-test('recognizes Radarr indexers after Prowlarr appends its display suffix', async () => {
-  const media = new MediaClients({});
-  media.arr = async () => [
-    { id: 2, name: 'YTS (Prowlarr)' },
-    { id: 12, name: 'Internet Archive (Prowlarr)' },
-  ];
-
-  assert.deepEqual(await media.defaultIndexerIds('movie'), [2]);
-  assert.deepEqual(await media.freeIndexerIds('movie'), [12]);
-});
-
 test('reports Free & Public Domain source health without exposing Prowlarr configuration', async () => {
   const media = new MediaClients({ tvProvider: {} });
   media.prowlarr = async () => [
@@ -484,22 +887,15 @@ test('reports Free & Public Domain source health without exposing Prowlarr confi
   ]);
 });
 
-test('reports both Nyaa indexers and keeps their Arr ids independently selectable', async () => {
+test('reports both Nyaa indexers independently', async () => {
   const media = new MediaClients({});
   media.prowlarr = async () => [
     { id: 20, name: 'Nyaa.si', enable: true },
     { id: 21, name: 'Nyaa.land', enable: true },
   ];
-  media.arr = async () => [
-    { id: 120, name: 'Nyaa.si (Prowlarr)', enable: true },
-    { id: 121, name: 'Nyaa.land (Prowlarr)', enable: true },
-  ];
-
   const sources = await media.downloadSources();
   assert.equal(sources.find(source => source.id === 'nyaa-si').state, 'ready');
   assert.equal(sources.find(source => source.id === 'nyaa-land').state, 'ready');
-  assert.deepEqual(await media.nyaaIndexerIds('movie'), { si: [120], land: [121] });
-  assert.deepEqual(await media.nyaaIndexerIds('series'), { si: [120], land: [121] });
 });
 
 test('reports a Nyaa.si Cloudflare challenge without exposing upstream HTML', async () => {
@@ -620,6 +1016,56 @@ test('normalizes the managed Radarr library and matches Jellyfin by path', async
   });
 });
 
+test('builds the Arr library when Jellyfin credentials are absent', async () => {
+  const media = new MediaClients({});
+  media.arr = async (service, requestPath) => {
+    if (service === 'radarr' && requestPath === '/movie') {
+      return [{ id: 11, title: 'Movie', year: 2024, movieFile: { path: '/library/Movie.mkv' } }];
+    }
+    if (service === 'sonarr' && requestPath === '/series') return [];
+    assert.fail(`${service} ${requestPath}`);
+  };
+
+  const result = await media.library();
+  assert.equal(result.length, 1);
+  assert.equal(result[0].jellyfinId, null);
+});
+
+test('matches 1000 Jellyfin items and limits subtitle scans to eight', async () => {
+  const movies = Array.from({ length: 1000 }, (_, index) => ({
+    id: index,
+    title: `Movie ${index}`,
+    year: 2024,
+    movieFile: { path: `/library/Movie ${index}/Movie ${index}.mkv` },
+  }));
+  const media = new MediaClients({ jellyfinApiKey: 'token' });
+  media.arr = async (service, requestPath) => {
+    if (service === 'radarr' && requestPath === '/movie') return movies;
+    if (service === 'sonarr' && requestPath === '/series') return [];
+    assert.fail(`${service} ${requestPath}`);
+  };
+  media.jellyfin = async () => ({ Items: movies.toReversed().map(movie => ({
+    Id: `jf-${movie.id}`,
+    Path: movie.movieFile.path,
+  })) });
+  let active = 0;
+  let maxActive = 0;
+  media.localSubtitlesForMovie = async movie => {
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setImmediate(resolve));
+    active -= 1;
+    return movie.id % 2 ? [{ id: 'vi' }] : [];
+  };
+
+  const result = await media.library();
+  assert.equal(result.length, 1000);
+  assert.equal(result[0].jellyfinId, 'jf-0');
+  assert.equal(result[999].jellyfinId, 'jf-999');
+  assert.equal(result[1].subtitleCount, 1);
+  assert.equal(maxActive <= 8, true);
+});
+
 test('builds compact Vietnamese subtitle coverage by series and season', async () => {
   const media = new MediaClients({});
   media.bazarr = async requestPath => {
@@ -652,6 +1098,41 @@ test('builds compact Vietnamese subtitle coverage by series and season', async (
       { seasonNumber: 2, episodeCount: 1, viAvailable: 0, viMissing: 1 },
     ],
   }]);
+});
+
+test('limits series subtitle coverage fan-out to four and keeps fallback order', async () => {
+  const series = Array.from({ length: 10 }, (_, index) => ({
+    id: index + 1,
+    title: `Series ${index + 1}`,
+    statistics: { episodeFileCount: 1 },
+  }));
+  const media = new MediaClients({});
+  let active = 0;
+  let maxActive = 0;
+  media.bazarr = async requestPath => {
+    if (requestPath.startsWith('/movies')) return { data: [] };
+    const id = Number(requestPath.match(/seriesid\[\]=(\d+)/)?.[1]);
+    active += 1;
+    maxActive = Math.max(maxActive, active);
+    await new Promise(resolve => setImmediate(resolve));
+    active -= 1;
+    if (id === 3) throw new Error('Bazarr unavailable');
+    return { data: [{ path: `/series/${id}.mkv`, season: 1, subtitles: [{ code2: 'vi' }] }] };
+  };
+  media.arr = async (service, requestPath) => {
+    assert.equal(service, 'sonarr');
+    if (requestPath === '/series') return series;
+    if (requestPath === '/episode?seriesId=3&includeEpisodeFile=true') {
+      return [{ hasFile: true, seasonNumber: 1, episodeFile: { path: '/series/3.mkv' } }];
+    }
+    assert.fail(requestPath);
+  };
+
+  const result = await media.subtitleMedia();
+  assert.deepEqual(result.map(item => item.mediaId), series.map(item => item.id));
+  assert.equal(result[2].coverageDegraded, true);
+  assert.equal(result[2].viMissing, 1);
+  assert.equal(maxActive <= 4, true);
 });
 
 test('loads one season lazily and puts episodes missing Vietnamese first', async () => {

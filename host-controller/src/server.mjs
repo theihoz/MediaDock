@@ -1,8 +1,10 @@
 import http from 'node:http';
 import os from 'node:os';
+import path from 'node:path';
+import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { authorize, canStopService, composeArgs, services, wholeStackCommands } from './controller.mjs';
+import { authorize, composeArgs, services, stackStartPlan, wholeStackCommands } from './controller.mjs';
 import { handleMaintenanceRequest, MaintenanceCleaner, startMaintenanceSchedule } from './maintenance.mjs';
 import { selectLanAddress } from './tv-network.mjs';
 
@@ -13,6 +15,8 @@ const projectDir = process.env.MEDIA_PROJECT_DIR;
 const docker = process.env.DOCKER_EXE ?? 'docker';
 const envFile = process.env.COMPOSE_ENV_FILE ?? '.env.compose';
 const mediaRoot = process.env.MEDIA_ROOT ?? 'D:/Media';
+const wslDistro = process.env.WSL_DISTRO ?? 'Ubuntu';
+const wslProjectDir = process.env.WSL_PROJECT_DIR;
 
 if (!token || !projectDir) throw new Error('HOST_CONTROLLER_TOKEN and MEDIA_PROJECT_DIR are required');
 const maintenance = new MaintenanceCleaner({ mediaRoot });
@@ -25,6 +29,17 @@ function send(res, status, body) {
 
 async function compose(args, timeout = 120000) {
   return exec(docker, ['compose', '--env-file', envFile, ...args], { cwd: projectDir, timeout, windowsHide: true });
+}
+
+async function startStack() {
+  const marker = path.join(mediaRoot, 'config', 'bootstrap', '.bootstrap-complete');
+  const plan = stackStartPlan({
+    bootstrapComplete: existsSync(marker),
+    distro: wslDistro,
+    projectDir: wslProjectDir,
+  });
+  if (plan.kind === 'compose') return compose(plan.args);
+  return exec(plan.command, plan.args, { timeout: 30 * 60 * 1000, windowsHide: true });
 }
 
 async function listServices() {
@@ -68,6 +83,10 @@ async function handle(req, res) {
 
   const whole = url.pathname.match(/^\/host\/(start|stop|restart)$/);
   if (req.method === 'POST' && whole) {
+    if (whole[1] === 'start') {
+      await startStack();
+      return send(res, 202, { state: 'starting' });
+    }
     const commands = wholeStackCommands(whole[1]);
     await compose(commands[0].slice(1));
     return send(res, 202, { state: `${whole[1]}ing` });
@@ -77,11 +96,6 @@ async function handle(req, res) {
   if (req.method === 'POST' && serviceAction) {
     const [, service, action] = serviceAction;
     if (!services.has(service)) return send(res, 404, { error: 'unknown_service' });
-    if (action === 'stop') {
-      const running = new Set((await listServices()).filter(item => item.state === 'running').map(item => item.id));
-      const guard = canStopService(service, running);
-      if (!guard.allowed) return send(res, 409, { error: 'dependency_running', reason: guard.reason });
-    }
     await compose(composeArgs(action, service).slice(1));
     return send(res, 202, { id: service, action });
   }
@@ -95,6 +109,6 @@ async function handle(req, res) {
   return send(res, 404, { error: 'not_found' });
 }
 
-http.createServer((req, res) => handle(req, res).catch(error => {
-  send(res, 500, { error: 'host_command_failed', message: error.message });
+http.createServer((req, res) => handle(req, res).catch(() => {
+  send(res, 500, { error: 'host_command_failed' });
 })).listen(port, '127.0.0.1');

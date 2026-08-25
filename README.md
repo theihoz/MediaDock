@@ -1,97 +1,59 @@
-# WSL Media Stack
+# Media Control
 
-Docker media stack for WSL2 with qBittorrent, Prowlarr, Radarr, Sonarr, Bazarr, Jellyfin, Jellyseerr, FlareSolverr, Autobrr, PostgreSQL, Redis and a credential-safe gateway.
+Media Control is a Windows desktop dashboard for a self-hosted movie and TV stack. A Flutter client controls one local Node gateway and the existing Docker providers while keeping service credentials outside the app. It offers discovery, prepared downloads, live download status, Vietnamese subtitle workflows, a Jellyfin library, and local service controls.
 
-## Start
+The detailed guides are available in [English](docs/guide.en.md) and [Vietnamese](docs/guide.vi.md). Release history is recorded in the [changelog](CHANGELOG.md).
 
-From Ubuntu WSL, run:
+## Installation Instructions
 
-```bash
-cd /mnt/d/path/to/MOVIE
-chmod +x scripts/*.sh
-./scripts/bootstrap.sh
-```
+Media Control requires 64-bit Windows 10 or newer, WSL2 with Ubuntu, Docker Desktop, the Microsoft Visual C++ 2015–2022 x64 runtime, and at least 10 GB free on the media drive. The default media root is `D:\Media`.
 
-The bootstrap creates `/mnt/d/Media`, copies `.env.example` to private `.env`, generates the two database secrets, creates media folders, temporarily starts the stack for configuration, and stops it before returning. Do not commit `.env`.
-
-If Docker Desktop WSL integration is disabled, the bootstrap automatically uses Docker Desktop's Windows CLI and converts `/mnt/d/Media` to `D:/Media` for bind mounts.
-
-The bootstrap completes the local qBittorrent, Radarr, Sonarr, Prowlarr, Bazarr and Jellyfin setup with `admin / media1234`. Prowlarr configures Internet Archive and the explicitly requested YTS indexer (`yts.gg` with `movies-api.accel.li`). Provider credentials and indexers must only be configured for sources you are authorized to use.
-
-Media Control includes server power controls, per-service actions, movie/release search, download queue, manual subtitle selection and a Jellyfin library launcher. The host controller listens only on `127.0.0.1:3210`; the app starts it on demand without starting the media stack.
-
-## Manual startup and cold boot
-
-All media containers use the Docker restart policy `no`. Restarting Windows or
-Docker Desktop therefore leaves the media server off. Start it only with the
-main **Bật server** button in Media Control or by manually starting containers
-in Docker Desktop.
-
-Media Control may start its small loopback host-controller when the app opens.
-That controller does not start Docker Desktop or any media container; it only
-makes the power buttons available. Its private configuration is stored at
-`%LOCALAPPDATA%\MediaControl\config.json`. If controller recovery fails, the app
-shows a Vietnamese retry screen instead of a raw socket exception.
-
-The **Tìm phim** page loads **Đang thịnh hành** automatically. Searching still
-uses the existing title lookup, and clearing the search restores trending
-movies. Trending metadata comes from the local Seerr integration and the
-backend keeps only a normalized last-good cache under the media cache folder.
-
-## Flutter Windows client
-
-The client source is in `flutter_app`. On a machine with Flutter Windows desktop support enabled, run `cd flutter_app && flutter create . --platforms=windows && flutter run -d windows`. It displays public gateway health only; service secrets never leave the WSL host.
-
-## Gateway
-
-`GET http://localhost:3000/health` returns readiness. `GET /v1/services` returns public URLs and normalized status without API keys or passwords.
-
-## Subtitle providers
-
-Bazarr remains the automatic subtitle manager. Its `Vietnamese-English`
-profile prioritizes Vietnamese and then English, using the free
-`yifysubtitles` and `gestdown` providers. OpenSubtitles.com joins the same
-concurrent Bazarr search when both local credentials are configured:
-
-```env
-OPENSUBTITLES_USERNAME=<free account username>
-OPENSUBTITLES_PASSWORD=<free account password>
-```
-
-The subtitle tab groups imported TV content by series and season. It displays
-`Vietsub x/y` coverage and loads individual episodes only after a season is
-selected; episodes missing Vietnamese subtitles are shown first.
-
-Media Control also offers an optional manual `YIFY Direct` fallback. The
-backend matches an existing library movie by IMDb ID, returns signed five-minute
-download tokens, limits file size, validates archive entries, and refreshes
-Bazarr and Jellyfin after installation. Flutter never receives raw provider
-URLs or destination paths. If the public provider requires a CAPTCHA or browser
-challenge, the backend reports `provider_unavailable` and does not bypass it.
-
-```env
-YIFY_DIRECT_ENABLED=true
-YIFY_DIRECT_BASE_URL=https://yifysubtitles.ch
-SUBTITLE_TOKEN_SECRET=<random local secret>
-```
-
-Only use media and subtitles you are authorized to access.
-
-## GitNexus
-
-The repository is indexed locally with GitNexus. The generated knowledge graph
-is intentionally excluded from Git, while `AGENTS.md`, `CLAUDE.md`, and the
-GitNexus skills are versioned so coding agents receive the project context.
+To build the unsigned installer from source, install Flutter with Windows desktop support and NSIS 3.x, then run PowerShell as Administrator:
 
 ```powershell
-npx --yes gitnexus@latest status
-npx --yes gitnexus@latest analyze
-npx --yes gitnexus@latest setup -c codex
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-installer.ps1
 ```
 
-Auto-config supports qBittorrent, Radarr, Sonarr, Prowlarr, Bazarr, and
-Jellyfin. The default local account is `admin / media1234`; do not expose these
-services directly to the Internet with that password.
+Run `dist\install.exe` as Administrator. The installer places the app in `C:\Program Files\Media Control` and the private stack in `C:\ProgramData\MediaControl\stack`. It prepares local configuration without starting the media containers.
 
-Samsung TV truy cập qua LAN: http://192.168.100.195:8096.
-Firewall giới hạn Private + LocalSubnet, cổng TCP 8096 và UDP 7359.
+For a source-only setup from Ubuntu WSL:
+
+```bash
+chmod +x scripts/*.sh
+./scripts/bootstrap.sh --keep-running
+```
+
+Keep `.env` and `.env.compose` private. They contain local credentials and generated secrets.
+
+## Usage
+
+Open Media Control and start the server from the System workspace. The Content workspace contains Discovery, Downloads, Vietsub, and Library. The System workspace contains Overview, Services, and Settings. Pages are loaded on first use and retain their state when switching workspaces.
+
+The first server start configures the providers. Later updates reconcile provider configuration automatically; an operator can run the repair command shown below at any time. Downloads prefer the live event stream and fall back to adaptive polling when the stream is unavailable.
+
+Stop the stack without deleting data:
+
+```bash
+docker compose --env-file .env.compose stop
+```
+
+## Examples / Demos
+
+Check the local gateway and inspect live download snapshots:
+
+```bash
+curl http://localhost:3000/health
+curl -N http://localhost:3000/v1/downloads/events
+```
+
+Reconcile provider settings without repeating first-run jobs:
+
+```bash
+./scripts/bootstrap.sh --repair
+```
+
+See the [English guide](docs/guide.en.md) or [Vietnamese guide](docs/guide.vi.md) for custom media roots, provider options, Docker commands, troubleshooting, and safe removal.
+
+## License
+
+Media Control is released under the [MIT License](LICENSE). Copyright © 2026 theihoz.

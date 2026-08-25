@@ -170,11 +170,17 @@ export class YtsOfficialTvProvider {
     this.trendingFlight = null;
   }
 
-  async request(params) {
+  async request(params, { signal } = {}) {
     const url = new URL(this.baseUrl);
     url.search = new URLSearchParams(params);
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
+    const abort = () => controller.abort(signal?.reason);
+    if (signal?.aborted) abort();
+    else signal?.addEventListener('abort', abort, { once: true });
+    const timer = setTimeout(() => {
+      const error = new TvProviderError('upstream_timeout');
+      controller.abort(error);
+    }, this.timeoutMs);
     try {
       const response = await this.fetchImpl(url, { signal: controller.signal, headers: { accept: 'application/json' } });
       if (!response.ok || !String(response.headers.get('content-type') ?? '').toLowerCase().includes('application/json')) throw new TvProviderError('yts_tv_provider_unavailable');
@@ -183,20 +189,24 @@ export class YtsOfficialTvProvider {
       return JSON.parse(text);
     } catch (error) {
       if (error instanceof TvProviderError) throw error;
+      if (error?.code === 'upstream_timeout') throw new TvProviderError('upstream_timeout');
       throw new TvProviderError('yts_tv_provider_unavailable');
-    } finally { clearTimeout(timer); }
+    } finally {
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', abort);
+    }
   }
 
-  async search(scope) {
+  async search(scope, { signal } = {}) {
     try {
-      const data = await this.request({ api: 'torrents', mode: 'tv', name: scope.title, year: String(scope.year ?? ''), quality: 'all' });
+      const data = await this.request({ api: 'torrents', mode: 'tv', name: scope.title, year: String(scope.year ?? ''), quality: 'all' }, { signal });
       const rows = filterTvTorrents(data.hits, scope);
-      if (rows.length === 0) throw new TvProviderError('yts_tv_release_unavailable');
       return rows.map(row => normalizeTvTorrent(row, scope, this.secret, this.now()));
     } catch (error) {
       if (error instanceof TvProviderError) throw error;
+      if (error?.code === 'upstream_timeout') throw new TvProviderError('upstream_timeout');
       throw new TvProviderError('yts_tv_provider_unavailable');
-    } finally {}
+    }
   }
 
   async trending() {
