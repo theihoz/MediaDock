@@ -4,7 +4,7 @@ import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { authorize, canStopService, composeArgs, services, stackStartPlan, wholeStackCommands } from './controller.mjs';
+import { authorize, composeArgs, services, stackStartPlan, wholeStackCommands } from './controller.mjs';
 import { handleMaintenanceRequest, MaintenanceCleaner, startMaintenanceSchedule } from './maintenance.mjs';
 import { selectLanAddress } from './tv-network.mjs';
 
@@ -96,11 +96,6 @@ async function handle(req, res) {
   if (req.method === 'POST' && serviceAction) {
     const [, service, action] = serviceAction;
     if (!services.has(service)) return send(res, 404, { error: 'unknown_service' });
-    if (action === 'stop') {
-      const running = new Set((await listServices()).filter(item => item.state === 'running').map(item => item.id));
-      const guard = canStopService(service, running);
-      if (!guard.allowed) return send(res, 409, { error: 'dependency_running', reason: guard.reason });
-    }
     await compose(composeArgs(action, service).slice(1));
     return send(res, 202, { id: service, action });
   }
@@ -114,6 +109,6 @@ async function handle(req, res) {
   return send(res, 404, { error: 'not_found' });
 }
 
-http.createServer((req, res) => handle(req, res).catch(error => {
-  send(res, 500, { error: 'host_command_failed', message: error.message });
+http.createServer((req, res) => handle(req, res).catch(() => {
+  send(res, 500, { error: 'host_command_failed' });
 })).listen(port, '127.0.0.1');

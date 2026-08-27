@@ -17,37 +17,6 @@ x-arr-environment: &arr-environment
   TZ: ${TZ:-Asia/Ho_Chi_Minh}
 
 services:
-  postgres:
-    image: postgres:16-alpine
-    restart: "no"
-    environment:
-      POSTGRES_DB: media
-      POSTGRES_USER: media
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-    volumes: ["postgres_data:/var/lib/postgresql/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U media -d media"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    networks: [media]
-    logging: *logging
-
-  redis:
-    image: redis:7-alpine
-    restart: "no"
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD}
-    volumes: ["redis_data:/data"]
-    healthcheck:
-      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a $$REDIS_PASSWORD ping | grep PONG"]
-      interval: 10s
-      timeout: 5s
-      retries: 12
-    environment:
-      REDIS_PASSWORD: ${REDIS_PASSWORD}
-    networks: [media]
-    logging: *logging
-
   qbittorrent:
     <<: *common
     image: lscr.io/linuxserver/qbittorrent:latest
@@ -118,19 +87,9 @@ services:
       LOG_LEVEL: info
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
 
-  autobrr:
-    <<: *common
-    image: ghcr.io/autobrr/autobrr:latest
-    environment: *arr-environment
-    volumes: ["${MEDIA_ROOT}/config/autobrr:/config"]
-    ports: ["7474:7474"]
-
   api:
     build: ./backend
     restart: "no"
-    depends_on:
-      postgres: { condition: service_healthy }
-      redis: { condition: service_healthy }
     environment:
       PORT: 3000
       QBITTORRENT_URL: http://qbittorrent:8080
@@ -166,13 +125,9 @@ services:
       - "${MEDIA_ROOT_DOCKER:-D:/Media}/config/seerr:/service-config/seerr:ro"
       - "${MEDIA_ROOT_DOCKER:-D:/Media}/library:/data/library"
       - "${MEDIA_ROOT_DOCKER:-D:/Media}/cache:/data/cache"
-    ports: ["3000:3000"]
+    ports: ["127.0.0.1:3000:3000"]
     networks: [media]
     logging: *logging
 
 networks:
   media: { name: media }
-
-volumes:
-  postgres_data: { name: media-stack-postgres-data, external: true }
-  redis_data: { name: media-stack-redis-data, external: true }

@@ -27,6 +27,24 @@ test('caches imported status longer than an awaiting import', async () => {
   assert.equal(calls, 3);
 });
 
+test('prunes expired import states and caps the cache', async () => {
+  let now = 0;
+  const cache = new ImportStatusCache({
+    now: () => now,
+    maxEntries: 2,
+    lookup: async () => false,
+  });
+
+  await cache.get('a', 'movies');
+  await cache.get('b', 'movies');
+  await cache.get('c', 'movies');
+  assert.deepEqual([...cache.values.keys()], ['movies:b', 'movies:c']);
+
+  now = 3001;
+  await cache.get('d', 'movies');
+  assert.deepEqual([...cache.values.keys()], ['movies:d']);
+});
+
 test('normalizes a Radarr movie with its Jellyfin playback state', () => {
   assert.deepEqual(normalizeLibraryMovie({
     id: 11, title: 'The Batman', year: 2022, path: '/data/library/movies/The Batman (2022)',

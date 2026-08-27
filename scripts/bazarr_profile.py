@@ -49,8 +49,16 @@ def _reconcile_config(
     seen: set[str] = set()
     in_general = False
     in_opensubtitles = False
+    providers_seen = False
+    opensubtitles_seen = False
+    opensubtitles_keys: set[str] = set()
     skipping_providers = False
     opensubtitles_enabled = bool(opensubtitles_username and opensubtitles_password)
+    providers = ["gestdown", "yifysubtitles"] + (["opensubtitlescom"] if opensubtitles_enabled else [])
+    opensubtitles_values = {
+        "password": opensubtitles_password if opensubtitles_enabled else "",
+        "username": opensubtitles_username if opensubtitles_enabled else "",
+    }
 
     for line in lines:
         if line and not line.startswith(" ") and line.endswith(":"):
@@ -58,17 +66,25 @@ def _reconcile_config(
                 for key, value in wanted.items():
                     if key not in seen:
                         output.append(f"  {key}: {value}")
+                if not providers_seen:
+                    output.append("  enabled_providers:")
+                    output.extend(f"  - {provider}" for provider in providers)
+            if in_opensubtitles:
+                for key, value in opensubtitles_values.items():
+                    if key not in opensubtitles_keys:
+                        output.append(f"  {key}: {json.dumps(value)}")
             in_general = line == "general:"
             in_opensubtitles = line == "opensubtitlescom:"
+            opensubtitles_seen = opensubtitles_seen or in_opensubtitles
             skipping_providers = False
         if in_general and skipping_providers:
             if line.startswith("  - "):
                 continue
             skipping_providers = False
         if in_general and line.startswith("  enabled_providers:"):
-            output.extend(["  enabled_providers:", "  - gestdown", "  - yifysubtitles"])
-            if opensubtitles_enabled:
-                output.append("  - opensubtitlescom")
+            output.append("  enabled_providers:")
+            output.extend(f"  - {provider}" for provider in providers)
+            providers_seen = True
             skipping_providers = True
             continue
         if in_general:
@@ -79,10 +95,12 @@ def _reconcile_config(
                 seen.add(key)
                 continue
         if in_opensubtitles and line.startswith("  username:"):
-            output.append(f"  username: {json.dumps(opensubtitles_username if opensubtitles_enabled else '')}")
+            output.append(f"  username: {json.dumps(opensubtitles_values['username'])}")
+            opensubtitles_keys.add("username")
             continue
         if in_opensubtitles and line.startswith("  password:"):
-            output.append(f"  password: {json.dumps(opensubtitles_password if opensubtitles_enabled else '')}")
+            output.append(f"  password: {json.dumps(opensubtitles_values['password'])}")
+            opensubtitles_keys.add("password")
             continue
         output.append(line)
 
@@ -90,6 +108,16 @@ def _reconcile_config(
         for key, value in wanted.items():
             if key not in seen:
                 output.append(f"  {key}: {value}")
+        if not providers_seen:
+            output.append("  enabled_providers:")
+            output.extend(f"  - {provider}" for provider in providers)
+    if in_opensubtitles:
+        for key, value in opensubtitles_values.items():
+            if key not in opensubtitles_keys:
+                output.append(f"  {key}: {json.dumps(value)}")
+    if not opensubtitles_seen:
+        output.append("opensubtitlescom:")
+        output.extend(f"  {key}: {json.dumps(value)}" for key, value in opensubtitles_values.items())
     temporary = config_path.with_suffix(config_path.suffix + ".tmp")
     temporary.write_text("\n".join(output) + "\n", encoding="utf-8")
     os.replace(temporary, config_path)
