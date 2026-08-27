@@ -1,5 +1,5 @@
 export const services = new Set([
-  'api', 'bazarr', 'flaresolverr', 'jellyfin',
+  'api', 'autobrr', 'bazarr', 'flaresolverr', 'jellyfin',
   'prowlarr', 'qbittorrent', 'radarr', 'seerr', 'sonarr',
 ]);
 
@@ -16,14 +16,14 @@ export function composeArgs(action, service) {
 }
 
 export function wholeStackCommands(action) {
-  if (action === 'start') return [['compose', 'up', '-d', '--remove-orphans']];
+  if (action === 'start') return [['compose', 'up', '-d']];
   if (action === 'stop') return [['compose', 'stop']];
   if (action === 'restart') return [['compose', 'restart']];
   throw new Error(`Unsupported action: ${action}`);
 }
 
 export function stackStartPlan({ bootstrapComplete, distro, projectDir }) {
-  if (bootstrapComplete) return { kind: 'compose', args: ['up', '-d', '--remove-orphans'] };
+  if (bootstrapComplete) return { kind: 'compose', args: ['up', '-d'] };
   if (!distro || !projectDir) throw new Error('WSL bootstrap settings are missing');
   return {
     kind: 'bootstrap',

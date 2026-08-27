@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "theihoz" "\0"
-            VALUE "FileDescription", "Media Control" "\0"
+            VALUE "CompanyName", "com.example" "\0"
+            VALUE "FileDescription", "media_control" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
             VALUE "InternalName", "media_control" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 theihoz" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
             VALUE "OriginalFilename", "media_control.exe" "\0"
-            VALUE "ProductName", "Media Control" "\0"
+            VALUE "ProductName", "media_control" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

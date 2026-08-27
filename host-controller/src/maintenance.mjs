@@ -12,6 +12,7 @@ const logRoots = [
   ['config', 'jellyfin', 'log'],
   ['config', 'seerr', 'logs'],
   ['config', 'qbittorrent', 'qBittorrent', 'logs'],
+  ['config', 'autobrr', 'logs'],
 ];
 const preservedCache = ['cache/trending.json', 'cache/trending-tv.json'];
 

@@ -14,7 +14,6 @@ async function fixture() {
     trending: path.join(root, 'cache', 'trending.json'),
     trendingTv: path.join(root, 'cache', 'trending-tv.json'),
     oldLog: path.join(root, 'config', 'radarr', 'logs', 'old.log'),
-    retiredAutobrrLog: path.join(root, 'config', 'autobrr', 'logs', 'keep.log'),
     config: path.join(root, 'config', 'radarr', 'config.xml'),
     media: path.join(root, 'library', 'movies', 'movie.mkv'),
   };
@@ -25,7 +24,6 @@ async function fixture() {
   const old = new Date('2026-08-11T00:00:00Z');
   await fs.utimes(files.oldCache, old, old);
   await fs.utimes(files.oldLog, old, old);
-  await fs.utimes(files.retiredAutobrrLog, old, old);
   return { root, files };
 }
 
@@ -44,7 +42,6 @@ test('scheduled cleanup deletes only allowlisted files older than 24 hours', asy
   assert.equal(result.reclaimedBytes, 8);
   assert.equal(await exists(files.oldCache), false);
   assert.equal(await exists(files.oldLog), false);
-  assert.equal(await exists(files.retiredAutobrrLog), true);
   assert.equal(await exists(files.newCache), true);
   assert.equal(await exists(files.trending), true);
   assert.equal(await exists(files.trendingTv), true);
@@ -64,7 +61,6 @@ test('manual cleanup removes new disposable files but preserves trending cache',
   assert.equal(await exists(files.trending), true);
   assert.equal(await exists(files.trendingTv), true);
   assert.equal(await exists(files.config), true);
-  assert.equal(await exists(files.retiredAutobrrLog), true);
 });
 
 test('maintenance schedule runs immediately without starting the media stack', async () => {

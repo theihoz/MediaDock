@@ -2,16 +2,15 @@
 param(
   [string]$ProjectDir = "$env:ProgramData\MediaControl\stack",
   [string]$AppDir = "$env:ProgramFiles\Media Control",
-  [string]$MediaRoot,
+  [string]$MediaRoot = 'D:\Media',
   [switch]$PreflightOnly,
   [switch]$SkipPreflight,
-  [switch]$SkipFirewall,
-  [switch]$RepairProviders
+  [switch]$SkipFirewall
 )
 
 $ErrorActionPreference = 'Stop'
 
-function Test-Prerequisites([string]$RequestedMediaRoot) {
+function Test-Prerequisites {
   if (-not [Environment]::Is64BitOperatingSystem -or [Environment]::OSVersion.Version.Major -lt 10) {
     throw 'Media Control requires 64-bit Windows 10 or newer.'
   }
@@ -28,12 +27,10 @@ function Test-Prerequisites([string]$RequestedMediaRoot) {
   if ($runtime.Installed -ne 1) {
     throw 'Microsoft Visual C++ 2015-2022 x64 runtime is missing: https://aka.ms/vs/17/release/vc_redist.x64.exe'
   }
-  $fullRoot = [IO.Path]::GetFullPath($RequestedMediaRoot)
-  $qualifier = Split-Path -Qualifier $fullRoot
-  if (-not $qualifier -or -not (Test-Path -LiteralPath $qualifier)) { throw "Media drive is unavailable: $fullRoot" }
-  $drive = Get-PSDrive ($qualifier.TrimEnd('\').TrimEnd(':'))
-  if ($drive.Free -lt 10GB) { throw "Media drive needs at least 10 GB free: $qualifier" }
-  $probe = Join-Path $qualifier ".media-control-write-$([guid]::NewGuid().ToString('N')).tmp"
+  if (-not (Test-Path -LiteralPath 'D:\')) { throw 'Drive D: is required for D:\Media.' }
+  $drive = Get-PSDrive D
+  if ($drive.Free -lt 10GB) { throw 'Drive D: needs at least 10 GB free.' }
+  $probe = "D:\.media-control-write-$([guid]::NewGuid().ToString('N')).tmp"
   try { [IO.File]::WriteAllText($probe, 'probe') } finally { Remove-Item -LiteralPath $probe -Force -ErrorAction SilentlyContinue }
 }
 
@@ -50,21 +47,7 @@ function Convert-ToWslPath([string]$Path) {
   return "/mnt/$($matches[1].ToLower())/$($matches[2].Replace('\', '/'))"
 }
 
-if (-not $MediaRoot) {
-  $existingCompose = Join-Path $ProjectDir '.env.compose'
-  if (Test-Path -LiteralPath $existingCompose) {
-    $rootLine = Get-Content -LiteralPath $existingCompose | Where-Object { $_ -match '^MEDIA_ROOT=' } | Select-Object -First 1
-    if ($rootLine -match '^MEDIA_ROOT=(.+)$') { $MediaRoot = $matches[1] }
-  }
-  if (-not $MediaRoot) {
-    $registered = Get-ItemProperty 'HKLM:\Software\MediaControl' -Name MediaRoot -ErrorAction SilentlyContinue
-    if ($registered) { $MediaRoot = $registered.MediaRoot }
-  }
-  if (-not $MediaRoot) { $MediaRoot = 'D:\Media' }
-}
-$MediaRoot = [IO.Path]::GetFullPath($MediaRoot).TrimEnd('\')
-
-if (-not $SkipPreflight) { Test-Prerequisites $MediaRoot }
+if (-not $SkipPreflight) { Test-Prerequisites }
 if ($PreflightOnly) { exit 0 }
 
 $example = Join-Path $ProjectDir '.env.example'
@@ -73,7 +56,7 @@ $composeEnv = Join-Path $ProjectDir '.env.compose'
 if (-not (Test-Path -LiteralPath $example)) { throw "Missing installer payload: $example" }
 
 New-Item -ItemType Directory -Force -Path $ProjectDir | Out-Null
-$dockerMediaRoot = $MediaRoot.Replace('\', '/')
+$MediaRoot = [IO.Path]::GetFullPath($MediaRoot).TrimEnd('\')
 foreach ($relative in @(
   'downloads\incomplete', 'downloads\complete', 'library\movies', 'library\series',
   'subtitles', 'config\bootstrap', 'cache', 'backups'
@@ -96,7 +79,6 @@ if (-not (Test-Path -LiteralPath $envPath)) {
   $lines = foreach ($line in Get-Content -LiteralPath $example) {
     if ($line -match '^([^#=]+)=(.*)$' -and $values.ContainsKey($matches[1])) { "$($matches[1])=$($values[$matches[1]])" }
     elseif ($line -match '^MEDIA_ROOT=') { "MEDIA_ROOT=$(Convert-ToWslPath $MediaRoot)" }
-    elseif ($line -match '^MEDIA_ROOT_DOCKER=') { "MEDIA_ROOT_DOCKER=$dockerMediaRoot" }
     elseif ($line -match '^WSL_PROJECT_DIR=') { "WSL_PROJECT_DIR=$(Convert-ToWslPath $ProjectDir)" }
     else { $line }
   }
@@ -105,12 +87,10 @@ if (-not (Test-Path -LiteralPath $envPath)) {
 
 $requiredEnvironment = [ordered]@{
   MEDIA_ROOT = Convert-ToWslPath $MediaRoot
-  MEDIA_ROOT_DOCKER = $dockerMediaRoot
   WSL_DISTRO = 'Ubuntu'
   WSL_PROJECT_DIR = Convert-ToWslPath $ProjectDir
 }
 $envLines = @(Get-Content -LiteralPath $envPath)
-if (-not ($envLines -match '^YTS_MOVIE_API_URL=')) { $envLines += 'YTS_MOVIE_API_URL=https://movies-api.accel.li' }
 foreach ($key in $requiredEnvironment.Keys) {
   $found = $false
   $envLines = @($envLines | ForEach-Object {
@@ -120,21 +100,16 @@ foreach ($key in $requiredEnvironment.Keys) {
 }
 [IO.File]::WriteAllLines($envPath, $envLines, (New-Object Text.UTF8Encoding($false)))
 
+$dockerMediaRoot = $MediaRoot.Replace('\', '/')
 $composeLines = foreach ($line in Get-Content -LiteralPath $envPath) {
-  if ($line -match '^MEDIA_ROOT(?:_DOCKER)?=') { "$($line.Split('=')[0])=$dockerMediaRoot" } else { $line }
+  if ($line -match '^MEDIA_ROOT=') { "MEDIA_ROOT=$dockerMediaRoot" } else { $line }
 }
+$composeLines += "MEDIA_ROOT_DOCKER=$dockerMediaRoot"
 [IO.File]::WriteAllLines($composeEnv, $composeLines, (New-Object Text.UTF8Encoding($false)))
 
 if (-not $SkipFirewall) {
   & (Join-Path $ProjectDir 'scripts\install-host-controller.ps1')
   if ($LASTEXITCODE) { throw 'Failed to configure the local controller.' }
-}
-
-$bootstrapMarker = Join-Path $MediaRoot 'config\bootstrap\.bootstrap-complete'
-if ($RepairProviders -and (Test-Path -LiteralPath $bootstrapMarker)) {
-  $bootstrap = Convert-ToWslPath (Join-Path $ProjectDir 'scripts\bootstrap.sh')
-  & wsl.exe -d Ubuntu -- bash $bootstrap --repair
-  if ($LASTEXITCODE) { throw 'Provider repair failed.' }
 }
 
 Write-Output "Media Control prepared at $AppDir"
