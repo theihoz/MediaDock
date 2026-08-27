@@ -87,13 +87,6 @@ services:
       LOG_LEVEL: info
       TZ: ${TZ:-Asia/Ho_Chi_Minh}
 
-  autobrr:
-    <<: *common
-    image: ghcr.io/autobrr/autobrr:latest
-    environment: *arr-environment
-    volumes: ["${MEDIA_ROOT}/config/autobrr:/config"]
-    ports: ["7474:7474"]
-
   api:
     build: ./backend
     restart: "no"
@@ -138,7 +131,3 @@ services:
 
 networks:
   media: { name: media }
-
-volumes:
-  postgres_data: { name: media-stack-postgres-data, external: true }
-  redis_data: { name: media-stack-redis-data, external: true }

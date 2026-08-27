@@ -114,6 +114,27 @@ opensubtitlescom:
         self.assertEqual(second["seriesUpdated"], 0)
         self.assertNotEqual(first["backupPath"], second["backupPath"])
 
+    def test_adds_missing_provider_keys_and_opensubtitles_section_idempotently(self):
+        self.config.write_text("""general:
+  adaptive_searching: false
+radarr:
+  use_radarr: true
+""", encoding="utf-8")
+
+        configure_profile(
+            self.db, self.config, self.backups, "20260813-120000",
+            opensubtitles_username="local-user", opensubtitles_password="local-password",
+        )
+        first = self.config.read_text(encoding="utf-8")
+        self.assertIn("  enabled_providers:\n  - gestdown\n  - yifysubtitles\n  - opensubtitlescom", first)
+        self.assertIn('opensubtitlescom:\n  password: "local-password"\n  username: "local-user"', first)
+
+        configure_profile(
+            self.db, self.config, self.backups, "20260813-120100",
+            opensubtitles_username="local-user", opensubtitles_password="local-password",
+        )
+        self.assertEqual(self.config.read_text(encoding="utf-8"), first)
+
 
 if __name__ == "__main__":
     unittest.main()

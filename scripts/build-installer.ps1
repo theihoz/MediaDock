@@ -5,6 +5,10 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
 $stage = Join-Path $root 'installer\.stage'
 $dist = Join-Path $root 'dist'
+$pubspec = Get-Content -Raw -LiteralPath (Join-Path $root 'flutter_app\pubspec.yaml')
+$versionMatch = [regex]::Match($pubspec, '(?m)^version:[ \t]*(?<version>\d+\.\d+\.\d+)\+\d+[ \t]*\r?$')
+if (-not $versionMatch.Success) { throw 'flutter_app/pubspec.yaml must contain version: x.y.z+build.' }
+$appVersion = $versionMatch.Groups['version'].Value
 
 if (-not $SkipFlutterBuild) {
   Push-Location (Join-Path $root 'flutter_app')
@@ -40,6 +44,6 @@ if ($private) { throw "Staging contains a private environment file or database: 
 
 $manifest = Get-ChildItem $stage -Recurse -File | ForEach-Object { $_.FullName.Substring($stage.Length + 1) }
 [IO.File]::WriteAllLines((Join-Path $stage 'stage-manifest.txt'), $manifest, (New-Object Text.UTF8Encoding($false)))
-& $MakensisPath '/WX' "/DSTAGE_DIR=$stage" "/DSOURCE_DIR=$root" "/DOUTPUT_FILE=$dist\install.exe" (Join-Path $root 'installer\media-control.nsi')
+& $MakensisPath '/WX' "/DAPP_VERSION=$appVersion" "/DSTAGE_DIR=$stage" "/DSOURCE_DIR=$root" "/DOUTPUT_FILE=$dist\install.exe" (Join-Path $root 'installer\media-control.nsi')
 if ($LASTEXITCODE -ne 0 -or -not (Test-Path "$dist\install.exe")) { throw 'NSIS build failed.' }
 Write-Output "Created $dist\install.exe"
