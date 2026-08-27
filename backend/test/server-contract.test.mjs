@@ -23,8 +23,8 @@ function fakeMedia(overrides = {}) {
   };
 }
 
-async function start(t, media) {
-  const server = createServer({ media });
+async function start(t, media, subtitleMaintenance) {
+  const server = createServer({ media, ...(subtitleMaintenance ? { subtitleMaintenance } : {}) });
   server.listen(0, '127.0.0.1');
   await once(server, 'listening');
   t.after(() => new Promise(resolve => server.close(resolve)));
@@ -40,6 +40,22 @@ async function request(base, path, { method = 'GET', json, raw } = {}) {
   const text = await response.text();
   return { status: response.status, body: text ? JSON.parse(text) : null, headers: response.headers };
 }
+
+test('exposes automatic Vietnamese subtitle maintenance status and trigger', async t => {
+  let runs = 0;
+  const scheduler = {
+    status: () => ({ enabled: true, state: 'idle', result: null }),
+    run: async () => { runs += 1; },
+  };
+  const base = await start(t, fakeMedia(), scheduler);
+
+  assert.deepEqual((await request(base, '/v1/subtitles/maintenance/status')).body, {
+    enabled: true, state: 'idle', result: null,
+  });
+  assert.equal((await request(base, '/v1/subtitles/maintenance/run', { method: 'POST' })).status, 202);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(runs, 1);
+});
 
 function slowChunkedRequest(base, path, chunks) {
   return new Promise((resolve, reject) => {

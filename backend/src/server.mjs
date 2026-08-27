@@ -14,6 +14,7 @@ import { YifyDirectProvider } from './yify-direct.mjs';
 import { JsonTrendingStore, TrendingMovies, createSeerrFetcher, createYtsPopularFetcher } from './trending-movies.mjs';
 import { YtsOfficialTvProvider } from './yts-official-tv.mjs';
 import { UnifiedSearch } from './unified-search.mjs';
+import { createSubtitleMaintenance } from './subtitle-maintenance.mjs';
 
 const registry = createServiceRegistry({
   qbittorrent: { url: process.env.QBITTORRENT_URL ?? 'http://qbittorrent:8080' },
@@ -161,7 +162,7 @@ function publicError(error) {
 }
 
 async function route(req, res, dependencies) {
-  const { registry, media, unifiedSearch, trending, tvProvider, yify, subtitleTokenSecret, downloadEvents } = dependencies;
+  const { registry, media, unifiedSearch, trending, tvProvider, yify, subtitleTokenSecret, downloadEvents, subtitleMaintenance } = dependencies;
   const url = new URL(req.url, `http://${req.headers.host}`);
   if (req.method === 'OPTIONS') return send(res, 204, {});
   if (req.method === 'GET' && url.pathname === '/health') return send(res, 200, { status: 'ready' });
@@ -239,6 +240,11 @@ async function route(req, res, dependencies) {
 
   if (req.method === 'GET' && url.pathname === '/v1/library') return send(res, 200, await media.library());
   if (req.method === 'POST' && url.pathname === '/v1/library/refresh') { await media.refreshJellyfin(); return send(res, 202, { state: 'scanning' }); }
+  if (req.method === 'GET' && url.pathname === '/v1/subtitles/maintenance/status') return send(res, 200, subtitleMaintenance.status());
+  if (req.method === 'POST' && url.pathname === '/v1/subtitles/maintenance/run') {
+    void subtitleMaintenance.run().catch(() => null);
+    return send(res, 202, { state: 'accepted' });
+  }
   if (req.method === 'GET' && url.pathname === '/v1/library/subtitle-media') return send(res, 200, await media.subtitleMedia());
   match = url.pathname.match(/^\/v1\/library\/subtitle-media\/(\d+)\/seasons\/(\d+)$/);
   if (req.method === 'GET' && match) return send(res, 200, await media.subtitleSeason(match[1], match[2]));
@@ -319,6 +325,13 @@ async function route(req, res, dependencies) {
 
 const defaultDependencies = {
   registry, media, unifiedSearch, trending, tvProvider, yify, subtitleTokenSecret,
+  subtitleMaintenance: createSubtitleMaintenance({
+    media,
+    enabled: process.env.SUBTITLE_AUTO_ENABLED !== 'false',
+    intervalMs: Number(process.env.SUBTITLE_AUTO_INTERVAL_MS ?? 6 * 60 * 60 * 1000),
+    maxItems: Number(process.env.SUBTITLE_AUTO_MAX_ITEMS ?? 50),
+    concurrency: Number(process.env.SUBTITLE_AUTO_CONCURRENCY ?? 2),
+  }),
   downloadEvents: createDownloadEventsHub(signal => media.downloads({ signal })),
 };
 
@@ -331,5 +344,7 @@ export function createServer(overrides = {}) {
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  createServer().listen(Number(process.env.PORT ?? 3000), '0.0.0.0');
+  const server = createServer();
+  defaultDependencies.subtitleMaintenance.start();
+  server.listen(Number(process.env.PORT ?? 3000), '0.0.0.0');
 }

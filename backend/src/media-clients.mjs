@@ -97,7 +97,7 @@ export function qbitActionEndpoint(action) {
 }
 
 export function normalizeSubtitleMedia(value) {
-  return {
+  const normalized = {
     mediaId: value.radarrId,
     title: value.title,
     year: Number(value.year || 0),
@@ -106,6 +106,10 @@ export function normalizeSubtitleMedia(value) {
     poster: value.poster,
     type: 'movie',
   };
+  if (Array.isArray(value.subtitles)) {
+    normalized.hasVietnamese = value.subtitles.some(item => subtitleCode(item) === 'vi');
+  }
+  return normalized;
 }
 
 export function normalizeSubtitleEpisode(value) {

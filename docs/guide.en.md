@@ -52,7 +52,7 @@ First run and repair reconcile existing resources instead of creating duplicates
 - Jellyfin networking, movie/series libraries, API token, and Arr notifications.
 - Bazarr Arr connections and the Vietnamese/English language profile.
 
-Seerr is optional and may be configured manually; its last-good data can still support discovery fallback. YTS movie and official-TV endpoints are optional public sources controlled by `YTS_MOVIE_API_URL`, `YTS_OFFICIAL_TV_URL`, and `YTS_OFFICIAL_TV_ENABLED`. YIFY Direct is opt-in through `YIFY_DIRECT_ENABLED` and `YIFY_DIRECT_BASE_URL`. OpenSubtitles joins Bazarr only when `OPENSUBTITLES_USERNAME` and `OPENSUBTITLES_PASSWORD` are present. Use only sources and content you are authorized to access.
+Seerr is optional and may be configured manually; its last-good data can still support discovery fallback. YTS movie and official-TV endpoints are optional public sources controlled by `YTS_MOVIE_API_URL`, `YTS_OFFICIAL_TV_URL`, and `YTS_OFFICIAL_TV_ENABLED`. YIFY Direct is opt-in through `YIFY_DIRECT_ENABLED` and `YIFY_DIRECT_BASE_URL`. OpenSubtitles joins Bazarr only when `OPENSUBTITLES_USERNAME` and `OPENSUBTITLES_PASSWORD` are present. Automatic Vietnamese subtitle maintenance is enabled by default, runs every six hours, and can be tuned with `SUBTITLE_AUTO_ENABLED`, `SUBTITLE_AUTO_INTERVAL_MS`, `SUBTITLE_AUTO_MAX_ITEMS`, and `SUBTITLE_AUTO_CONCURRENCY`. Use only sources and content you are authorized to access.
 
 ## Configuration
 

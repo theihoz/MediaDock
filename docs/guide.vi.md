@@ -52,7 +52,7 @@ Lần chạy đầu và repair reconcile tài nguyên hiện có thay vì tạo 
 - Network, thư viện phim/series, API token và Arr notification của Jellyfin.
 - Kết nối Arr và profile ngôn ngữ Việt/Anh của Bazarr.
 
-Seerr là tùy chọn và có thể cấu hình thủ công; dữ liệu last-good vẫn có thể hỗ trợ discovery fallback. Endpoint phim và TV chính thức của YTS là nguồn công khai tùy chọn, điều khiển bằng `YTS_MOVIE_API_URL`, `YTS_OFFICIAL_TV_URL` và `YTS_OFFICIAL_TV_ENABLED`. YIFY Direct chỉ bật qua `YIFY_DIRECT_ENABLED` và `YIFY_DIRECT_BASE_URL`. OpenSubtitles chỉ tham gia Bazarr khi có `OPENSUBTITLES_USERNAME` và `OPENSUBTITLES_PASSWORD`. Chỉ dùng nguồn và nội dung bạn được phép truy cập.
+Seerr là tùy chọn và có thể cấu hình thủ công; dữ liệu last-good vẫn có thể hỗ trợ discovery fallback. Endpoint phim và TV chính thức của YTS là nguồn công khai tùy chọn, điều khiển bằng `YTS_MOVIE_API_URL`, `YTS_OFFICIAL_TV_URL` và `YTS_OFFICIAL_TV_ENABLED`. YIFY Direct chỉ bật qua `YIFY_DIRECT_ENABLED` và `YIFY_DIRECT_BASE_URL`. OpenSubtitles chỉ tham gia Bazarr khi có `OPENSUBTITLES_USERNAME` và `OPENSUBTITLES_PASSWORD`. Tự động tìm phụ đề Việt được bật mặc định, chạy mỗi sáu giờ và có thể điều chỉnh bằng `SUBTITLE_AUTO_ENABLED`, `SUBTITLE_AUTO_INTERVAL_MS`, `SUBTITLE_AUTO_MAX_ITEMS` và `SUBTITLE_AUTO_CONCURRENCY`. Chỉ dùng nguồn và nội dung bạn được phép truy cập.
 
 ## Cấu hình
 
